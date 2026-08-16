@@ -1,0 +1,22 @@
+{
+    "showThinkingSummaries": true,
+    "env": {
+        "CLAUDE_CODE_EXTRA_BODY": "{\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"}}"
+    },
+    "permissions": {
+        "allow": [
+            "WebFetch(domain:raw.githubusercontent.com)",
+            "WebFetch(domain:create.roblox.com)",
+            "WebFetch(domain:devforum.roblox.com)",
+            "WebFetch(domain:code.claude.com)",
+            "WebFetch(domain:docs.claude.com)",
+            "WebFetch(domain:rojo.space)",
+            "Bash(git status*)",
+            "Bash(git diff*)",
+            "Bash(git log*)",
+            "mcp__serena",
+            "mcp__Roblox_Studio_Win",
+            "mcp__Roblox_Studio_Mac"
+        ]
+    }
+}
