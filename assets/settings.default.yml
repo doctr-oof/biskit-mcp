@@ -1,0 +1,100 @@
+# Biskit project settings.
+#
+# This file is checked into version control and shared by everyone on the project.
+# For personal overrides that should not be committed, use settings.local.yml —
+# it accepts the same keys and takes priority over anything set here.
+#
+# Every key below is optional. The commented values are the defaults.
+
+lsp:
+  # Release tag of luau-lsp to use. The carpenter fork tags with a leading "v".
+  # version: "v0.2.0"
+
+  # GitHub repository the release asset is downloaded from.
+  # repository: "Sawhorse-Interactive/luau-lsp-carpenter"
+
+  # Override the download URL entirely. Supports {version} and {asset} placeholders.
+  # Only github.com and its release-asset hosts are permitted unless you also set
+  # a matching checksum.
+  # download_url_template: null
+
+  # Skip downloading and use an executable you already have. Absolute path.
+  # binary_path: null
+
+  # SHA-256 digests keyed by release asset filename. Biskit ships pinned digests for
+  # the default version; set these when you pin a different version, because the
+  # carpenter fork does not publish checksums of its own.
+  # checksums: {}
+
+  # Refuse to run a downloaded binary that has no known digest. Turning this off
+  # allows unverified downloads — only do so for a version you control.
+  # require_checksum: true
+
+  # "roblox" enables the DataModel-aware platform and Roblox global types.
+  # "standard" is for plain Luau projects with no Roblox API surface.
+  # platform: roblox
+
+  # Which Roblox API dump to load. Higher levels expose more restricted members.
+  # One of: None, PluginSecurity, LocalUserSecurity, RobloxScriptSecurity
+  # roblox_security_level: PluginSecurity
+
+  # Where Roblox global type definitions are fetched from. {security_level} is substituted.
+  # type_definitions_url: "https://luau-lsp.pages.dev/type-definitions/globalTypes.{security_level}.d.luau"
+
+  # API documentation source. Defaults to the Roblox docs on the roblox platform and
+  # the plain Luau docs on the standard platform.
+  # documentation_url: null
+
+  # Extra definition files, appended after the fetched Roblox globals.
+  # Each entry is "@alias=relative/path.d.luau".
+  # definition_files: []
+
+  # Extra documentation JSON files, given as project-relative paths.
+  # documentation_files: []
+
+  # Additional arguments appended to the `luau-lsp lsp` invocation.
+  # extra_args: []
+
+  # Project-relative path to a .luaurc used as the configuration base.
+  # base_luaurc: null
+
+  # Project-relative path to the Rojo sourcemap. Set to null to disable sourcemap
+  # loading entirely. Generate it with:
+  #   rojo sourcemap --include-non-scripts --watch default.project.json --output sourcemap.json
+  # sourcemap: "sourcemap.json"
+
+  # Watch the sourcemap file and tell the language server when it changes. Without
+  # this, a regenerated sourcemap needs a restart_language_server call to take effect.
+  # watch_sourcemap: true
+
+  # Raw luau-lsp settings passed straight through, in VS Code dotted-key form.
+  # Anything valid in the luau-lsp VS Code extension works here.
+  # server_settings:
+  #   luau-lsp.diagnostics.strictDatamodelTypes: true
+
+  # How long to wait for the language server to become ready, in milliseconds.
+  # startup_timeout_ms: 60000
+
+  # How long any single language server request may take, in milliseconds.
+  # request_timeout_ms: 30000
+
+  # How long to wait for diagnostics to settle after opening a file, in milliseconds.
+  # diagnostics_settle_ms: 1500
+
+project:
+  # Extra paths excluded from find_file, list_dir, and search_for_pattern.
+  # Gitignore syntax, one pattern per entry.
+  # ignored_paths: []
+
+  # Honour .gitignore and .git/info/exclude when walking the project.
+  # respect_gitignore: true
+
+tools:
+  # Tool names to hide from the agent entirely.
+  # excluded: []
+
+  # Truncation thresholds. Raise them if you are routinely losing results,
+  # lower them to keep responses small.
+  # max_answer_chars: 150000
+  # max_listing_entries: 2000
+  # max_pattern_matches: 200

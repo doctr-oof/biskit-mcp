@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build and publish
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: biskit-mcp-windows-x86_64.zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: biskit-mcp-macos-aarch64.tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset: biskit-mcp-macos-x86_64.tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: biskit-mcp-linux-x86_64.tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: biskit-mcp-linux-aarch64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staging = New-Item -ItemType Directory -Force -Path staging
+          Copy-Item "target/${{ matrix.target }}/release/biskit-mcp.exe" $staging
+          Compress-Archive -Path "$staging/*" -DestinationPath "${{ matrix.asset }}"
+          $hash = (Get-FileHash "${{ matrix.asset }}" -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.asset }}" | Out-File -Encoding ascii "${{ matrix.asset }}.sha256"
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          staging=staging
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/biskit-mcp" "$staging/"
+          tar -czf "${{ matrix.asset }}" -C "$staging" biskit-mcp
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Collect checksums
+        run: cat artifacts/*.sha256 > artifacts/SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: artifacts/*
+          generate_release_notes: true

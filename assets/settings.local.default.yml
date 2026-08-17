@@ -1,0 +1,11 @@
+# Personal Biskit overrides for this project.
+#
+# This file is gitignored. It accepts exactly the same keys as settings.yml and
+# takes priority over anything set there. Leave it empty unless you need to
+# deviate from the shared project configuration.
+#
+# Example:
+#
+# lsp:
+#   binary_path: "C:/tools/luau-lsp.exe"
+#   roblox_security_level: RobloxScriptSecurity
