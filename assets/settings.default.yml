@@ -82,8 +82,11 @@ lsp:
   # diagnostics_settle_ms: 1500
 
 project:
-  # Extra paths excluded from find_file, list_dir, and search_for_pattern.
-  # Gitignore syntax, one pattern per entry.
+  # Extra paths excluded from every walk: find_file, list_dir, search_for_pattern,
+  # and the project scan that find_symbol runs when given no relative_path.
+  # Gitignore syntax, one pattern per entry, for example "Packages/" or
+  # "**/node_modules". A leading "!" is taken literally rather than as a
+  # re-include, since every entry here names something to exclude.
   # ignored_paths: []
 
   # Honour .gitignore and .git/info/exclude when walking the project.
