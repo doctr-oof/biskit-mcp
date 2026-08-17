@@ -174,6 +174,9 @@ pub struct SymbolLocationRequest {
     pub name_path: String,
     /// File containing the symbol, relative to the project root.
     pub relative_path: String,
+    /// Source lines to show either side of each reference. 0 shows the reference line alone.
+    #[serde(default)]
+    pub context_lines: usize,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -506,6 +509,7 @@ impl Biskit {
                 &request.name_path,
                 &request.relative_path,
                 self.inner.settings.tools.max_listing_entries,
+                request.context_lines,
             )
             .await
             .map_err(fail("find_referencing_symbols"))?)

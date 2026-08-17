@@ -54,6 +54,8 @@ When file has two symbols of same name, `get_symbols_overview` labels them `User
 
 Top-level symbol in result carries full name path. Nested symbol under `children` carries only own leaf name, because ancestry already spelled by chain it sits under. Join with `/` to address it: child `update` under `PlayerService` is `PlayerService/update`.
 
+`find_referencing_symbols` snippet is reference line alone by default. Pass `context_lines: 1` or more when you need surrounding lines to judge how symbol used. Each extra line multiplies across every reference, so raise only when line itself not enough.
+
 Type signatures omitted by default. Pass `include_detail: true` to `get_symbols_overview`, `find_symbol`, or `find_declaration` when you actually need signature, not just where symbol lives.
 
 ## After you edit code

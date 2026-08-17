@@ -248,6 +248,9 @@ A symbol at the top of a result carries its full name path. A symbol nested unde
 only its own leaf name, because the chain of parents above it already spells the ancestry out. Join
 them with `/` to address one: `update` under `PlayerService` is `PlayerService/update`.
 
+`find_referencing_symbols` reports the reference line on its own. Pass `context_lines` to widen the
+snippet either side of it, remembering that each extra line is paid once per reference.
+
 The language server's type signature for a symbol is omitted unless asked for. Pass
 `include_detail: true` to `get_symbols_overview`, `find_symbol`, or `find_declaration` when the
 signature is what you are after rather than the location.

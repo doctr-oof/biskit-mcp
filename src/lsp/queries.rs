@@ -16,6 +16,10 @@ const NAME_PATH_HINT: &str = "a name path is a symbol name such as \"update\", o
                               qualified with its owners as \"PlayerService:update\"; prefix \"/\" \
                               to anchor it to the top level of the file";
 
+/// Lines either side of a declaration reported with `include_body`. A declaration whose own symbol
+/// could not be resolved has only its line to show, so one line of context earns its place there.
+const DECLARATION_CONTEXT_LINES: usize = 1;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolMatch {
     /// Absent when the location falls outside every symbol in its file.
@@ -293,6 +297,7 @@ impl<'a> SymbolQuery<'a> {
         name_path: &str,
         relative_path: &str,
         max_results: usize,
+        context_lines: usize,
     ) -> Result<Vec<ReferenceMatch>> {
         let session = self.handle.session().await?;
         let (path, _, position) = self.locate_one(&session, name_path, relative_path).await?;
@@ -326,7 +331,7 @@ impl<'a> SymbolQuery<'a> {
                 relative_path: relative,
                 line: location.range.start.line + 1,
                 containing_symbol: containing,
-                snippet: snippet_around(&content, location.range.start.line),
+                snippet: snippet_around(&content, location.range.start.line, context_lines),
             });
         }
         Ok(references)
@@ -351,7 +356,11 @@ impl<'a> SymbolQuery<'a> {
             let node = SymbolNode::innermost_at(&symbols, location.range.start);
             let body = if include_body {
                 let content = session.ensure_open(&target).await?;
-                Some(snippet_around(&content, location.range.start.line))
+                Some(snippet_around(
+                    &content,
+                    location.range.start.line,
+                    DECLARATION_CONTEXT_LINES,
+                ))
             } else {
                 None
             };
@@ -584,14 +593,15 @@ fn extract_body(content: &str, node: &SymbolNode) -> String {
     lines[start..=end].join("\n")
 }
 
-fn snippet_around(content: &str, line: u32) -> String {
+/// The line at `line`, widened by `context` lines on each side.
+fn snippet_around(content: &str, line: u32, context: usize) -> String {
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
         return String::new();
     }
     let index = (line as usize).min(lines.len().saturating_sub(1));
-    let start = index.saturating_sub(1);
-    let end = (index + 1).min(lines.len().saturating_sub(1));
+    let start = index.saturating_sub(context);
+    let end = (index + context).min(lines.len().saturating_sub(1));
     lines[start..=end].join("\n")
 }
 
