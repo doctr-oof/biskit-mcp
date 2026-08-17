@@ -132,6 +132,9 @@ pub struct SymbolsOverviewRequest {
     /// How many levels of nested symbols to include. 0 lists top-level symbols only.
     #[serde(default)]
     pub depth: u32,
+    /// Include each symbol's type signature. Off by default because signatures are long.
+    #[serde(default)]
+    pub include_detail: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -148,6 +151,9 @@ pub struct FindSymbolRequestInput {
     /// Include each matched symbol's source text.
     #[serde(default)]
     pub include_body: bool,
+    /// Include each symbol's type signature. Off by default because signatures are long.
+    #[serde(default)]
+    pub include_detail: bool,
     /// LSP SymbolKind numbers to keep. Empty means all kinds.
     #[serde(default)]
     pub include_kinds: Vec<u32>,
@@ -179,6 +185,9 @@ pub struct FindDeclarationRequest {
     /// Include a source snippet around each result.
     #[serde(default)]
     pub include_body: bool,
+    /// Include each symbol's type signature. Off by default because signatures are long.
+    #[serde(default)]
+    pub include_detail: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -434,7 +443,11 @@ impl Biskit {
     ) -> ToolResult {
         let query = SymbolQuery::new(&self.inner.language_server);
         ok(&query
-            .symbols_overview(&request.relative_path, request.depth)
+            .symbols_overview(
+                &request.relative_path,
+                request.depth,
+                request.include_detail,
+            )
             .await
             .map_err(fail("get_symbols_overview"))?)
     }
@@ -453,6 +466,7 @@ impl Biskit {
                 relative_path: request.relative_path,
                 depth: request.depth,
                 include_body: request.include_body,
+                include_detail: request.include_detail,
                 include_kinds: request.include_kinds,
                 exclude_kinds: request.exclude_kinds,
                 substring_matching: request.substring_matching,
@@ -475,6 +489,7 @@ impl Biskit {
                 &request.name_path,
                 &request.relative_path,
                 request.include_body,
+                request.include_detail,
             )
             .await
             .map_err(fail("find_declaration"))?)

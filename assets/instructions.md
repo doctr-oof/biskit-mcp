@@ -54,6 +54,8 @@ When file has two symbols of same name, `get_symbols_overview` labels them `User
 
 Top-level symbol in result carries full name path. Nested symbol under `children` carries only own leaf name, because ancestry already spelled by chain it sits under. Join with `/` to address it: child `update` under `PlayerService` is `PlayerService/update`.
 
+Type signatures omitted by default. Pass `include_detail: true` to `get_symbols_overview`, `find_symbol`, or `find_declaration` when you actually need signature, not just where symbol lives.
+
 ## After you edit code
 
 Biskit read source from disk each request, so edits visible immediately. After non-trivial edit, call `get_file_diagnostics` on changed file. If edit changed symbol signature or behavior, call `get_symbol_diagnostics` with `check_symbol_references: true` to catch breakage at call sites.

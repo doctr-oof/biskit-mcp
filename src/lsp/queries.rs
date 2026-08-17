@@ -78,12 +78,22 @@ pub struct SymbolQuery<'a> {
     pub handle: &'a LanguageServerHandle,
 }
 
+/// What a rendered symbol carries beyond its name, kind, and line range. `detail` is the language
+/// server's type signature, which is long enough to be worth asking for rather than assuming.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderOptions {
+    pub depth: u32,
+    pub include_body: bool,
+    pub include_detail: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct FindSymbolRequest {
     pub name_path: String,
     pub relative_path: Option<String>,
     pub depth: u32,
     pub include_body: bool,
+    pub include_detail: bool,
     pub include_kinds: Vec<u32>,
     pub exclude_kinds: Vec<u32>,
     pub substring_matching: bool,
@@ -173,6 +183,7 @@ impl<'a> SymbolQuery<'a> {
         &self,
         relative_path: &str,
         depth: u32,
+        include_detail: bool,
     ) -> Result<Vec<SymbolMatch>> {
         let path = self.project().resolve(relative_path)?;
         ensure_luau_file(&path)?;
@@ -181,11 +192,17 @@ impl<'a> SymbolQuery<'a> {
         let symbols = session.document_symbols(&path).await?;
         let content = session.ensure_open(&path).await?;
 
+        let options = RenderOptions {
+            depth,
+            include_body: false,
+            include_detail,
+        };
+
         // Low-level kinds are pruned from children, not from the top level: a module whose
         // only top-level symbols are variables would otherwise look like an empty file.
         Ok(symbols
             .iter()
-            .map(|symbol| render(symbol, &content, depth, false))
+            .map(|symbol| render(symbol, &content, options))
             .collect())
     }
 
@@ -245,6 +262,7 @@ impl<'a> SymbolQuery<'a> {
         name_path: &str,
         relative_path: &str,
         include_body: bool,
+        include_detail: bool,
     ) -> Result<SymbolsByFile> {
         let session = self.handle.session().await?;
         let (path, symbol, position) = self.locate_one(&session, name_path, relative_path).await?;
@@ -255,13 +273,18 @@ impl<'a> SymbolQuery<'a> {
         if locations.is_empty() {
             let content = session.ensure_open(&path).await?;
             let relative = self.project().relativize(&path)?;
+            let options = RenderOptions {
+                depth: 0,
+                include_body,
+                include_detail,
+            };
             return Ok(SymbolsByFile::from([(
                 relative,
-                vec![render(&symbol, &content, 0, include_body)],
+                vec![render(&symbol, &content, options)],
             )]));
         }
 
-        self.render_locations(&session, locations, include_body)
+        self.render_locations(&session, locations, include_body, include_detail)
             .await
     }
 
@@ -314,6 +337,7 @@ impl<'a> SymbolQuery<'a> {
         session: &Session,
         locations: Vec<Location>,
         include_body: bool,
+        include_detail: bool,
     ) -> Result<SymbolsByFile> {
         let mut rendered = SymbolsByFile::new();
         for location in locations {
@@ -339,7 +363,9 @@ impl<'a> SymbolQuery<'a> {
                     .unwrap_or_else(|| "Unknown".to_string()),
                 start_line: location.range.start.line + 1,
                 end_line: location.range.end.line + 1,
-                detail: node.and_then(|found| found.detail.clone()),
+                detail: include_detail
+                    .then(|| node.and_then(|found| found.detail.clone()))
+                    .flatten(),
                 body,
                 children: Vec::new(),
             });
@@ -475,38 +501,53 @@ fn collect_matches(
             && !request.exclude_kinds.contains(&node.kind);
 
         if kind_allowed && pattern.matches(&node.ancestors()) {
-            out.push(render(node, content, request.depth, request.include_body));
+            out.push(render(
+                node,
+                content,
+                RenderOptions {
+                    depth: request.depth,
+                    include_body: request.include_body,
+                    include_detail: request.include_detail,
+                },
+            ));
         }
         collect_matches(&node.children, pattern, request, limit, content, out);
     }
 }
 
 /// Renders a symbol that sits at the top of a result, named by its full name path.
-fn render(node: &SymbolNode, content: &str, depth: u32, include_body: bool) -> SymbolMatch {
-    render_node(node, content, depth, include_body, true)
+fn render(node: &SymbolNode, content: &str, options: RenderOptions) -> SymbolMatch {
+    render_node(node, content, options, true)
 }
 
 /// Renders a nested symbol, named by its own leaf segment. The ancestry is already spelled out by
 /// the chain of parents it sits under, so repeating it would cost the caller the prefix on every
 /// child. Join a child's name to its parent's name path with `/` to address it.
-fn render_child(node: &SymbolNode, content: &str, depth: u32) -> SymbolMatch {
-    render_node(node, content, depth, false, false)
+fn render_child(node: &SymbolNode, content: &str, options: RenderOptions) -> SymbolMatch {
+    let options = RenderOptions {
+        include_body: false,
+        ..options
+    };
+    render_node(node, content, options, false)
 }
 
 fn render_node(
     node: &SymbolNode,
     content: &str,
-    depth: u32,
-    include_body: bool,
+    options: RenderOptions,
     full_name_path: bool,
 ) -> SymbolMatch {
-    let children = if depth == 0 {
+    let children = if options.depth == 0 {
         Vec::new()
     } else {
+        let nested = RenderOptions {
+            depth: options.depth - 1,
+            ..options
+        };
         node.children
             .iter()
             .filter(|child| !is_low_level_kind(child.kind))
-            .map(|child| render_child(child, content, depth - 1))
+            .map(|child| render_child(child, content, nested))
             .collect()
     };
 
@@ -521,8 +562,11 @@ fn render_node(
         kind: node.kind_label().to_string(),
         start_line: node.range.start.line + 1,
         end_line: node.range.end.line + 1,
-        detail: node.detail.clone(),
-        body: include_body.then(|| extract_body(content, node)),
+        detail: options
+            .include_detail
+            .then(|| node.detail.clone())
+            .flatten(),
+        body: options.include_body.then(|| extract_body(content, node)),
         children,
     }
 }
