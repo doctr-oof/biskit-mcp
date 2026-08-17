@@ -5,9 +5,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      tag:
-        description: Tag to build and publish
-        required: true
+      version:
+        description: "Version to release (e.g. 0.2.0, without leading v). Leave empty to auto-bump the patch version."
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -16,7 +17,77 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            CURRENT=$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' Cargo.toml)
+            MAJOR=${CURRENT%%.*}
+            REST=${CURRENT#*.}
+            MINOR=${REST%%.*}
+            PATCH=${REST#*.}
+            PATCH=${PATCH%%-*}
+            VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version '$VERSION' (expected semver like 0.2.0 or 0.2.0-rc.1)"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+      - name: Check tag availability
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.resolve.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists"
+            exit 1
+          fi
+
+      - name: Bump manifest and tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.resolve.outputs.version }}"
+          TAG="${{ steps.resolve.outputs.tag }}"
+
+          sed -i "0,/^version = .*/s//version = \"$VERSION\"/" Cargo.toml
+          cargo update --workspace
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release $TAG"
+          git tag "$TAG"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "$TAG"
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -40,7 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Add target
         run: rustup target add ${{ matrix.target }}
@@ -83,7 +154,7 @@ jobs:
             ${{ matrix.asset }}.sha256
 
   publish:
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -96,6 +167,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
           files: artifacts/*
           generate_release_notes: true
+          draft: true
