@@ -49,10 +49,10 @@ pub struct ReferenceMatch {
     pub snippet: String,
 }
 
+/// Severity is deliberately absent: it is already the key of the map this entry sits under.
 #[derive(Debug, Clone, Serialize)]
 pub struct DiagnosticEntry {
     pub line: u32,
-    pub severity: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
@@ -554,7 +554,6 @@ fn group_diagnostics(
 
         let entry = DiagnosticEntry {
             line: diagnostic.range.start.line + 1,
-            severity: severity.label().to_string(),
             message: diagnostic.message,
             code: diagnostic.code.map(|code| match code {
                 serde_json::Value::String(text) => text,
