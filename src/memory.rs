@@ -14,6 +14,8 @@ const UNKNOWN_MEMORY_HINT: &str = "call list_memories to see which memories exis
 const REGEX_HINT: &str = "the pattern is a Rust regex matched with multi-line and \
                           dot-matches-newline enabled; escape ( ) [ ] . * + ? | \\ to match them \
                           literally";
+const REPLACEMENT_HINT: &str = "capture groups are numbered from 1 in the order their opening \
+                                parenthesis appears, and \"$$\" inserts one literal dollar sign";
 
 pub struct MemoryStore {
     project: Project,
@@ -96,8 +98,9 @@ impl MemoryStore {
         if !path.is_file() {
             bail_hint!(UNKNOWN_MEMORY_HINT; "memory not found: {}", canonical_name(name));
         }
-        std::fs::remove_file(&path)?;
-        self.prune_empty_dirs(&path)?;
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to delete memory: {}", canonical_name(name)))?;
+        self.prune_empty_dirs(&path);
         Ok(canonical_name(name))
     }
 
@@ -123,6 +126,7 @@ impl MemoryStore {
                     REGEX_HINT,
                 )
             })?;
+        validate_replacement(&regex, replacement)?;
 
         let matches = regex.find_iter(&original).count();
         if matches == 0 {
@@ -169,7 +173,7 @@ impl MemoryStore {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::rename(&source, &target)?;
-        self.prune_empty_dirs(&source)?;
+        self.prune_empty_dirs(&source);
 
         let updated_references = self.rewrite_references(&stem(from), &stem(to))?;
         Ok(RenameOutcome {
@@ -236,7 +240,14 @@ impl MemoryStore {
         Ok(resolved)
     }
 
-    fn prune_empty_dirs(&self, removed: &Path) -> Result<()> {
+    /// Removes the directories a deleted memory left behind, as far as it can get.
+    ///
+    /// Tidying is not part of the outcome the caller asked for: a directory handle held by a cloud
+    /// sync client, a search indexer, or a virus scanner fails the removal with a permission error
+    /// even when the directory is empty, and reporting that as a failed delete would describe a
+    /// file that is already gone as still there. A directory left standing holds no memories and
+    /// `list` does not report it.
+    fn prune_empty_dirs(&self, removed: &Path) {
         let memories_root = self.project.memories_dir();
         let mut cursor = removed.parent().map(Path::to_path_buf);
 
@@ -244,18 +255,82 @@ impl MemoryStore {
             if directory == memories_root || !directory.starts_with(&memories_root) {
                 break;
             }
-            if std::fs::read_dir(&directory)?.next().is_some() {
+            let emptied = match std::fs::read_dir(&directory) {
+                Ok(mut entries) => entries.next().is_none(),
+                Err(_) => false,
+            };
+            if !emptied {
                 break;
             }
-            std::fs::remove_dir(&directory)?;
+            if std::fs::remove_dir(&directory).is_err() {
+                break;
+            }
             cursor = directory.parent().map(Path::to_path_buf);
         }
-        Ok(())
     }
 }
 
 fn reference_matches(reference: &str, from_stem: &str) -> bool {
     stem(reference) == from_stem
+}
+
+/// Rejects a replacement that names a capture group the pattern does not define.
+///
+/// `$1` and `$name` are expansions, and an expansion the pattern cannot fill is substituted with
+/// the empty string rather than refused, so a dollar sign meant literally silently swallows the
+/// word that follows it. Callers writing prose into a memory hit this without ever asking for a
+/// capture group.
+fn validate_replacement(regex: &Regex, replacement: &str) -> Result<()> {
+    let bytes = replacement.as_bytes();
+    let mut cursor = 0;
+
+    while let Some(offset) = replacement[cursor..].find('$') {
+        let after = cursor + offset + 1;
+        if bytes.get(after) == Some(&b'$') {
+            cursor = after + 1;
+            continue;
+        }
+
+        let (reference, next) = match bytes.get(after) {
+            // An unclosed brace is not an expansion at all, so it stands as written.
+            Some(b'{') => match replacement[after + 1..].find('}') {
+                Some(end) => (&replacement[after + 1..after + 1 + end], after + end + 2),
+                None => (&replacement[after..after], after),
+            },
+            _ => {
+                let end = after
+                    + replacement[after..]
+                        .find(|character: char| !is_reference_character(character))
+                        .unwrap_or(replacement.len() - after);
+                (&replacement[after..end], end)
+            }
+        };
+        cursor = next;
+
+        if reference.is_empty() || reference_resolves(regex, reference) {
+            continue;
+        }
+        bail_hint!(
+            REPLACEMENT_HINT;
+            "replacement names capture group ${reference}, which the pattern does not define; \
+             write $${reference} to insert it literally"
+        );
+    }
+    Ok(())
+}
+
+fn is_reference_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
+}
+
+fn reference_resolves(regex: &Regex, reference: &str) -> bool {
+    if let Ok(group) = reference.parse::<usize>() {
+        return group < regex.captures_len();
+    }
+    regex
+        .capture_names()
+        .flatten()
+        .any(|name| name == reference)
 }
 
 fn collect(root: &Path, directory: &Path, out: &mut Vec<String>) -> Result<()> {
@@ -363,6 +438,49 @@ mod tests {
         let outcome = store.edit("notes", "alpha", "beta", true).unwrap();
         assert_eq!(outcome.replacements, 2);
         assert_eq!(store.read("notes").unwrap(), "beta\nbeta\n");
+    }
+
+    #[test]
+    fn edit_refuses_a_replacement_naming_a_missing_group() {
+        let (_guard, store) = store();
+        store.create("notes", "edited at now", false).unwrap();
+
+        let error = store
+            .edit("notes", "now", "$1", false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("$1"), "{error}");
+        assert_eq!(store.read("notes").unwrap(), "edited at now");
+    }
+
+    #[test]
+    fn edit_expands_groups_and_keeps_literal_dollars() {
+        let (_guard, store) = store();
+        store.create("notes", "version 1", false).unwrap();
+
+        store
+            .edit("notes", r"version (\d+)", "release $1", false)
+            .unwrap();
+        assert_eq!(store.read("notes").unwrap(), "release 1");
+
+        store
+            .edit("notes", "release", "costs $$5 for", false)
+            .unwrap();
+        assert_eq!(store.read("notes").unwrap(), "costs $5 for 1");
+
+        store.edit("notes", "costs", "and $ then", false).unwrap();
+        assert_eq!(store.read("notes").unwrap(), "and $ then $5 for 1");
+    }
+
+    #[test]
+    fn edit_accepts_a_named_group() {
+        let (_guard, store) = store();
+        store.create("notes", "owner: eric", false).unwrap();
+
+        store
+            .edit("notes", r"owner: (?<who>\w+)", "maintainer: ${who}", false)
+            .unwrap();
+        assert_eq!(store.read("notes").unwrap(), "maintainer: eric");
     }
 
     #[test]
