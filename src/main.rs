@@ -8,6 +8,7 @@ mod project;
 mod prompts;
 mod server;
 mod setup;
+mod upgrade;
 
 use std::path::PathBuf;
 
@@ -87,6 +88,12 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Replace this executable with a published release. Touches nothing else.
+    Upgrade {
+        /// Release tag to install, for example "v0.1.4". Defaults to the latest release.
+        #[arg(long)]
+        tag: Option<String>,
+    },
     /// Emit agent hook payloads.
     Hook {
         #[command(subcommand)]
@@ -139,6 +146,7 @@ fn main() -> Result<()> {
             project,
             project_from_cwd,
         } => run_doctor(RootRequest::new(project, project_from_cwd)),
+        Command::Upgrade { tag } => upgrade::run(tag),
         Command::Hook {
             which:
                 HookCommand::SessionStart {

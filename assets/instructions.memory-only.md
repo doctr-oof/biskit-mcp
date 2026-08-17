@@ -18,10 +18,27 @@ reading code, and own type checker or build for verifying edits. Mode set by
 `project.memory_only: true` in `.biskit/settings.yml`; only the human running the project should
 change it.
 
-## Start of every session
+## Start of every session — mandatory, no exceptions
 
-Call `list_memories` first. Returns memory names only. Read ones whose names relate to task with
-`read_memory`. Not every memory.
+**Check project memory before you do anything else.** Before you answer a question, open a file, run
+a search, or plan an approach. This is a requirement, not a suggestion, and it applies to every
+session without exception — including short tasks and projects you believe you already understand.
+
+1. Call `list_memories` first. Returns memory names only.
+2. Call `read_memory` on every name that plausibly relates to the task. When unsure whether a memory
+   is relevant, read it.
+3. Only then begin the work.
+
+This matters more here than anywhere else. In memory-only mode there is no language server behind
+you: no symbol lookup, no reference search, no diagnostics to catch a wrong assumption after the
+fact. Stored memory is the only durable project knowledge Biskit can give you, and regex search will
+not recover what it holds — decisions, invariants, the reasoning behind a workaround. Start without
+it and you are guessing.
+
+Names alone tell you nothing, so `list_memories` on its own does not satisfy this step. If
+`initial_instructions` already handed you the memory index, you still must `read_memory` the
+relevant entries. "None look relevant" is a conclusion you may reach only after reading the list,
+never before it. Reading the whole memory store is also wrong — select by name, then read.
 
 ## Choosing a tool
 

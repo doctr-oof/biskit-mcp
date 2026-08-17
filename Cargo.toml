@@ -1,6 +1,6 @@
 [package]
 name = "biskit-mcp"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.88"
 description = "Project memory and Luau code intelligence over the Model Context Protocol"
@@ -21,6 +21,8 @@ serde-saphyr = "1.1"
 ureq = "3.4"
 sha2 = "0.11"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
+tar = "0.4"
+flate2 = "1.1"
 ignore = "0.4.33"
 globset = "0.4.20"
 regex = "1.13"

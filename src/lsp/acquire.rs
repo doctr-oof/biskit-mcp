@@ -157,7 +157,7 @@ fn ensure_support_file(url: &str, root: &Path, file_name: &str) -> Option<PathBu
     }
 }
 
-fn download(url: &str, allowed_hosts: &[&str]) -> Result<Vec<u8>> {
+pub fn download(url: &str, allowed_hosts: &[&str]) -> Result<Vec<u8>> {
     check_host(url, allowed_hosts)?;
 
     let response = ureq::get(url)
@@ -215,7 +215,7 @@ fn check_host(url: &str, allowed_hosts: &[&str]) -> Result<()> {
     bail!("refusing to download from an unexpected host: {host}")
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
+pub fn hex_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -267,7 +267,7 @@ fn extract_binary(archive: &[u8], root: &Path, destination: &Path) -> Result<()>
 }
 
 #[cfg(unix)]
-fn make_executable(path: &Path) -> Result<()> {
+pub fn make_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut permissions = std::fs::metadata(path)?.permissions();
     permissions.set_mode(0o755);
@@ -276,7 +276,7 @@ fn make_executable(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<()> {
+pub fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
