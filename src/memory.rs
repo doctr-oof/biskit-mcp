@@ -1,12 +1,19 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use regex::{Regex, RegexBuilder};
 
+use crate::bail_hint;
+use crate::errors::hinted;
 use crate::project::{Project, normalize_separators};
 
 pub const MEMORY_EXTENSION: &str = "md";
 const MEM_REFERENCE_PATTERN: &str = r"mem:([A-Za-z0-9._\-/]+)";
+
+const UNKNOWN_MEMORY_HINT: &str = "call list_memories to see which memories exist for this project";
+const REGEX_HINT: &str = "the pattern is a Rust regex matched with multi-line and \
+                          dot-matches-newline enabled; escape ( ) [ ] . * + ? | \\ to match them \
+                          literally";
 
 pub struct MemoryStore {
     project: Project,
@@ -56,7 +63,7 @@ impl MemoryStore {
     pub fn read(&self, name: &str) -> Result<String> {
         let path = self.path_for(name)?;
         if !path.is_file() {
-            bail!("memory not found: {}", canonical_name(name));
+            bail_hint!(UNKNOWN_MEMORY_HINT; "memory not found: {}", canonical_name(name));
         }
         std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read memory: {}", canonical_name(name)))
@@ -66,9 +73,9 @@ impl MemoryStore {
         let path = self.path_for(name)?;
         let replaced = path.is_file();
         if replaced && !overwrite {
-            bail!(
-                "memory already exists: {}; amend it with edit_memory, or pass overwrite to \
-                 replace it wholesale",
+            bail_hint!(
+                "amend it with edit_memory, or pass overwrite: true to replace it wholesale";
+                "memory already exists: {}",
                 canonical_name(name)
             );
         }
@@ -87,7 +94,7 @@ impl MemoryStore {
     pub fn delete(&self, name: &str) -> Result<String> {
         let path = self.path_for(name)?;
         if !path.is_file() {
-            bail!("memory not found: {}", canonical_name(name));
+            bail_hint!(UNKNOWN_MEMORY_HINT; "memory not found: {}", canonical_name(name));
         }
         std::fs::remove_file(&path)?;
         self.prune_empty_dirs(&path)?;
@@ -103,25 +110,36 @@ impl MemoryStore {
     ) -> Result<EditOutcome> {
         let path = self.path_for(name)?;
         if !path.is_file() {
-            bail!("memory not found: {}", canonical_name(name));
+            bail_hint!(UNKNOWN_MEMORY_HINT; "memory not found: {}", canonical_name(name));
         }
         let original = std::fs::read_to_string(&path)?;
         let regex = RegexBuilder::new(pattern)
             .multi_line(true)
             .dot_matches_new_line(true)
             .build()
-            .with_context(|| format!("invalid regular expression: {pattern}"))?;
+            .map_err(|error| {
+                hinted(
+                    format!("invalid regular expression: {pattern}: {error}"),
+                    REGEX_HINT,
+                )
+            })?;
 
         let matches = regex.find_iter(&original).count();
         if matches == 0 {
-            bail!(
+            bail_hint!(
+                format!(
+                    "read_memory {} and copy the target text verbatim into the pattern",
+                    canonical_name(name)
+                );
                 "pattern did not match anything in memory {}: {pattern}",
                 canonical_name(name)
             );
         }
         if matches > 1 && !allow_multiple {
-            bail!(
-                "pattern matched {matches} times in memory {}; pass allow_multiple_occurrences to replace them all",
+            bail_hint!(
+                "narrow the pattern with surrounding context, or pass \
+                 allow_multiple_occurrences: true to replace every match";
+                "pattern matched {matches} times in memory {}",
                 canonical_name(name)
             );
         }
@@ -137,11 +155,15 @@ impl MemoryStore {
     pub fn rename(&self, from: &str, to: &str) -> Result<RenameOutcome> {
         let source = self.path_for(from)?;
         if !source.is_file() {
-            bail!("memory not found: {}", canonical_name(from));
+            bail_hint!(UNKNOWN_MEMORY_HINT; "memory not found: {}", canonical_name(from));
         }
         let target = self.path_for(to)?;
         if target.exists() {
-            bail!("memory already exists: {}", canonical_name(to));
+            bail_hint!(
+                "pick a different new_name, or delete the existing memory first";
+                "memory already exists: {}",
+                canonical_name(to)
+            );
         }
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
@@ -191,7 +213,11 @@ impl MemoryStore {
     fn path_for(&self, name: &str) -> Result<PathBuf> {
         let stem = stem(name);
         if stem.is_empty() {
-            bail!("memory name must not be empty");
+            bail_hint!(
+                "pass a name such as \"style-guide\" or \"architecture/rendering\", without the \
+                 .md extension";
+                "memory name must not be empty"
+            );
         }
         let relative = format!(
             "{}/{}/{}.{MEMORY_EXTENSION}",
@@ -201,7 +227,11 @@ impl MemoryStore {
         );
         let resolved = self.project.resolve(&relative)?;
         if !resolved.starts_with(self.project.memories_dir()) {
-            bail!("memory name escapes the memories directory: {name}");
+            bail_hint!(
+                "memory names are relative and nest with \"/\"; they may not contain \"..\" or \
+                 start from a drive or root";
+                "memory name escapes the memories directory: {name}"
+            );
         }
         Ok(resolved)
     }

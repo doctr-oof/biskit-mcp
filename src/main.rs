@@ -1,4 +1,5 @@
 mod config;
+mod errors;
 mod files;
 mod lsp;
 mod memory;

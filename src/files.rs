@@ -1,16 +1,23 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use globset::{Glob, GlobMatcher};
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use serde::Serialize;
 
+use crate::bail_hint;
 use crate::config::Settings;
+use crate::errors::hinted;
 use crate::project::Project;
 
 const LUAU_EXTENSIONS: [&str; 3] = ["luau", "lua", "luaurc"];
+const MISSING_DIRECTORY_HINT: &str = "paths are relative to the project root; run list_dir on \".\" \
+                                      or on the parent to see what is there";
+const REGEX_HINT: &str = "substring_pattern is a Rust regex matched with multi-line and \
+                          dot-matches-newline enabled; escape ( ) [ ] . * + ? | \\ to match them \
+                          literally";
 
 pub struct FileTools {
     project: Project,
@@ -56,9 +63,7 @@ impl FileTools {
 
     pub fn list_dir(&self, relative_path: &str, recursive: bool) -> Result<DirectoryListing> {
         let base = self.project.resolve(relative_path)?;
-        if !base.is_dir() {
-            bail!("not a directory: {relative_path}");
-        }
+        ensure_directory(&base, relative_path)?;
 
         let mut listing = DirectoryListing::default();
         let limit = self.settings.tools.max_listing_entries;
@@ -92,9 +97,7 @@ impl FileTools {
 
     pub fn find_file(&self, file_mask: &str, relative_path: &str) -> Result<Vec<String>> {
         let base = self.project.resolve(relative_path)?;
-        if !base.is_dir() {
-            bail!("not a directory: {relative_path}");
-        }
+        ensure_directory(&base, relative_path)?;
         let matcher = compile_glob(file_mask)?;
         let limit = self.settings.tools.max_listing_entries;
 
@@ -123,11 +126,23 @@ impl FileTools {
         request: PatternSearchRequest<'_>,
     ) -> Result<PatternSearchResult> {
         let base = self.project.resolve(request.relative_path)?;
+        if !base.exists() {
+            bail_hint!(
+                MISSING_DIRECTORY_HINT;
+                "no such file or directory: {}",
+                request.relative_path
+            );
+        }
         let regex = RegexBuilder::new(request.pattern)
             .multi_line(true)
             .dot_matches_new_line(true)
             .build()
-            .with_context(|| format!("invalid regular expression: {}", request.pattern))?;
+            .map_err(|error| {
+                hinted(
+                    format!("invalid regular expression: {}: {error}", request.pattern),
+                    REGEX_HINT,
+                )
+            })?;
 
         let include = request.paths_include_glob.map(compile_glob).transpose()?;
         let exclude = request.paths_exclude_glob.map(compile_glob).transpose()?;
@@ -221,9 +236,28 @@ impl FileTools {
     }
 }
 
+fn ensure_directory(base: &Path, relative_path: &str) -> Result<()> {
+    if base.is_dir() {
+        return Ok(());
+    }
+    if base.exists() {
+        bail_hint!(
+            "this path is a file; pass its parent directory, or use search_for_pattern to look \
+             inside the file itself";
+            "not a directory: {relative_path}"
+        );
+    }
+    bail_hint!(MISSING_DIRECTORY_HINT; "no such directory: {relative_path}");
+}
+
 fn compile_glob(pattern: &str) -> Result<GlobMatcher> {
     Ok(Glob::new(pattern)
-        .with_context(|| format!("invalid glob pattern: {pattern}"))?
+        .map_err(|error| {
+            hinted(
+                format!("invalid glob pattern: {pattern}: {error}"),
+                "globs use *, ?, [] and **, for example \"*.luau\" or \"src/**/init.luau\"",
+            )
+        })?
         .compile_matcher())
 }
 

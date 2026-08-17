@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 use serde::Serialize;
 
 use super::name_path::NamePathPattern;
@@ -9,7 +9,12 @@ use super::protocol::{Diagnostic, Location, Position, Severity, is_low_level_kin
 use super::session::{LanguageServerHandle, Session, ensure_luau_file};
 use super::symbols::SymbolNode;
 use super::uri;
+use crate::bail_hint;
 use crate::project::Project;
+
+const NAME_PATH_HINT: &str = "a name path is a symbol name such as \"update\", optionally \
+                              qualified with its owners as \"PlayerService:update\"; prefix \"/\" \
+                              to anchor it to the top level of the file";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolMatch {
@@ -101,7 +106,11 @@ impl<'a> SymbolQuery<'a> {
             return Ok(vec![resolved]);
         }
         if !resolved.is_dir() {
-            bail!("no such file or directory: {relative}");
+            bail_hint!(
+                "locate the path with find_file or list_dir, or omit relative_path to search the \
+                 whole project";
+                "no such file or directory: {relative}"
+            );
         }
 
         let all = self.handle.resolve_luau_files().await?;
@@ -114,7 +123,7 @@ impl<'a> SymbolQuery<'a> {
     pub async fn find_symbol(&self, request: FindSymbolRequest) -> Result<SymbolSearchResult> {
         let pattern = NamePathPattern::parse(&request.name_path, request.substring_matching);
         if pattern.is_empty() {
-            bail!("name_path must not be empty");
+            bail_hint!(NAME_PATH_HINT; "name_path must not be empty");
         }
 
         let session = self.handle.session().await?;
@@ -199,7 +208,13 @@ impl<'a> SymbolQuery<'a> {
         }
 
         match found.len() {
-            0 => bail!("no symbol matching {name_path} in {relative_path}"),
+            0 => bail_hint!(
+                format!(
+                    "name paths are case-sensitive; call get_symbols_overview on {relative_path} \
+                     to see what it defines. {NAME_PATH_HINT}"
+                );
+                "no symbol matching {name_path} in {relative_path}"
+            ),
             1 => {
                 let symbol = found.remove(0);
                 let position = symbol.target_position(&content);
@@ -207,9 +222,13 @@ impl<'a> SymbolQuery<'a> {
             }
             count => {
                 let names: Vec<&str> = found.iter().map(|node| node.name_path.as_str()).collect();
-                bail!(
-                    "{name_path} is ambiguous in {relative_path}: {count} matches ({}). \
-                     Use a more specific name path.",
+                bail_hint!(
+                    format!(
+                        "name one of them in full, for example \"{}\"; same-named siblings are \
+                         addressed by index, as in \"{name_path}[0]\"",
+                        names[0]
+                    );
+                    "{name_path} is ambiguous in {relative_path}: {count} matches ({})",
                     names.join(", ")
                 )
             }
@@ -557,8 +576,12 @@ pub fn severity_from_input(value: Option<u32>) -> Result<Severity> {
         2 => Ok(Severity::Warning),
         3 => Ok(Severity::Information),
         4 => Ok(Severity::Hint),
-        other => Err(anyhow!(
-            "min_severity must be 1 (error), 2 (warning), 3 (information), or 4 (hint), got {other}"
+        other => Err(crate::errors::hinted(
+            format!(
+                "min_severity must be 1 (error), 2 (warning), 3 (information), or 4 (hint), got \
+                 {other}"
+            ),
+            "omit min_severity to report errors and warnings",
         )),
     }
 }

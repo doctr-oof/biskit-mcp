@@ -3,11 +3,12 @@ use std::sync::Arc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{ErrorData as McpError, ServerHandler, schemars, tool, tool_handler, tool_router};
+use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::config::Settings;
+use crate::errors;
 use crate::files::{FileTools, PatternSearchRequest};
 use crate::lsp::queries::{FindSymbolRequest, SymbolQuery, severity_from_input};
 use crate::lsp::session::LanguageServerHandle;
@@ -28,20 +29,24 @@ struct Inner {
     language_server: LanguageServerHandle,
 }
 
-fn ok<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
+/// Tool failures travel back as `isError` results rather than JSON-RPC errors, so clients render
+/// the message itself instead of an `MCP error -32602:` envelope.
+type ToolResult = Result<CallToolResult, String>;
+
+fn ok<T: Serialize>(value: &T) -> ToolResult {
     let rendered = serde_json::to_string_pretty(value)
-        .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        .map_err(|error| format!("failed to serialise the tool result: {error}"))?;
     Ok(CallToolResult::success(vec![ContentBlock::text(rendered)]))
 }
 
-fn text(value: impl Into<String>) -> Result<CallToolResult, McpError> {
+fn text(value: impl Into<String>) -> ToolResult {
     Ok(CallToolResult::success(vec![ContentBlock::text(
         value.into(),
     )]))
 }
 
-fn fail(error: anyhow::Error) -> McpError {
-    McpError::invalid_params(format!("{error:#}"), None)
+fn fail(tool: &'static str) -> impl Fn(anyhow::Error) -> String {
+    move |error| errors::render(tool, &error)
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -274,8 +279,12 @@ impl Biskit {
     async fn initial_instructions(
         &self,
         Parameters(NoArguments {}): Parameters<NoArguments>,
-    ) -> Result<CallToolResult, McpError> {
-        let memories = self.inner.memories.list().map_err(fail)?;
+    ) -> ToolResult {
+        let memories = self
+            .inner
+            .memories
+            .list()
+            .map_err(fail("initial_instructions"))?;
         text(prompts::initial_instructions(
             &memories,
             self.inner.settings.project.memory_only,
@@ -286,20 +295,17 @@ impl Biskit {
     async fn list_memories(
         &self,
         Parameters(NoArguments {}): Parameters<NoArguments>,
-    ) -> Result<CallToolResult, McpError> {
-        ok(&self.inner.memories.list().map_err(fail)?)
+    ) -> ToolResult {
+        ok(&self.inner.memories.list().map_err(fail("list_memories"))?)
     }
 
     #[tool(description = "Reads the full markdown content of one memory.")]
-    async fn read_memory(
-        &self,
-        Parameters(request): Parameters<MemoryNameRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    async fn read_memory(&self, Parameters(request): Parameters<MemoryNameRequest>) -> ToolResult {
         text(
             self.inner
                 .memories
                 .read(&request.memory_name)
-                .map_err(fail)?,
+                .map_err(fail("read_memory"))?,
         )
     }
 
@@ -309,12 +315,12 @@ impl Biskit {
     async fn create_memory(
         &self,
         Parameters(request): Parameters<CreateMemoryRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> ToolResult {
         let outcome = self
             .inner
             .memories
             .create(&request.memory_name, &request.content, request.overwrite)
-            .map_err(fail)?;
+            .map_err(fail("create_memory"))?;
         let verb = if outcome.replaced {
             "Replaced"
         } else {
@@ -327,22 +333,19 @@ impl Biskit {
     async fn delete_memory(
         &self,
         Parameters(request): Parameters<MemoryNameRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> ToolResult {
         let name = self
             .inner
             .memories
             .delete(&request.memory_name)
-            .map_err(fail)?;
+            .map_err(fail("delete_memory"))?;
         text(format!("Deleted memory {name}."))
     }
 
     #[tool(
         description = "Replaces content matching a regular expression inside an existing memory. Prefer this over rewriting a memory wholesale."
     )]
-    async fn edit_memory(
-        &self,
-        Parameters(request): Parameters<EditMemoryRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    async fn edit_memory(&self, Parameters(request): Parameters<EditMemoryRequest>) -> ToolResult {
         let outcome = self
             .inner
             .memories
@@ -352,7 +355,7 @@ impl Biskit {
                 &request.replacement,
                 request.allow_multiple_occurrences,
             )
-            .map_err(fail)?;
+            .map_err(fail("edit_memory"))?;
         text(format!(
             "Replaced {} occurrence(s) in memory {}.",
             outcome.replacements, outcome.memory
@@ -365,12 +368,12 @@ impl Biskit {
     async fn rename_memory(
         &self,
         Parameters(request): Parameters<RenameMemoryRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> ToolResult {
         let outcome = self
             .inner
             .memories
             .rename(&request.old_name, &request.new_name)
-            .map_err(fail)?;
+            .map_err(fail("rename_memory"))?;
         ok(&serde_json::json!({
             "from": outcome.from,
             "to": outcome.to,
@@ -379,27 +382,21 @@ impl Biskit {
     }
 
     #[tool(description = "Lists files and directories under a project-relative path.")]
-    async fn list_dir(
-        &self,
-        Parameters(request): Parameters<ListDirRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    async fn list_dir(&self, Parameters(request): Parameters<ListDirRequest>) -> ToolResult {
         ok(&self
             .inner
             .files
             .list_dir(&request.relative_path, request.recursive)
-            .map_err(fail)?)
+            .map_err(fail("list_dir"))?)
     }
 
     #[tool(description = "Finds files whose name matches a glob mask.")]
-    async fn find_file(
-        &self,
-        Parameters(request): Parameters<FindFileRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    async fn find_file(&self, Parameters(request): Parameters<FindFileRequest>) -> ToolResult {
         ok(&self
             .inner
             .files
             .find_file(&request.file_mask, &request.relative_path)
-            .map_err(fail)?)
+            .map_err(fail("find_file"))?)
     }
 
     #[tool(
@@ -408,7 +405,7 @@ impl Biskit {
     async fn search_for_pattern(
         &self,
         Parameters(request): Parameters<SearchForPatternRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> ToolResult {
         let result = self
             .inner
             .files
@@ -422,7 +419,7 @@ impl Biskit {
                 restrict_to_code_files: request.restrict_search_to_code_files,
                 max_matches: self.inner.settings.tools.max_pattern_matches,
             })
-            .map_err(fail)?;
+            .map_err(fail("search_for_pattern"))?;
         ok(&result)
     }
 
@@ -432,12 +429,12 @@ impl Biskit {
     async fn get_symbols_overview(
         &self,
         Parameters(request): Parameters<SymbolsOverviewRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> ToolResult {
         let query = SymbolQuery::new(&self.inner.language_server);
         ok(&query
             .symbols_overview(&request.relative_path, request.depth)
             .await
-            .map_err(fail)?)
+            .map_err(fail("get_symbols_overview"))?)
     }
 
     #[tool(
@@ -446,7 +443,7 @@ impl Biskit {
     async fn find_symbol(
         &self,
         Parameters(request): Parameters<FindSymbolRequestInput>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> ToolResult {
         let query = SymbolQuery::new(&self.inner.language_server);
         ok(&query
             .find_symbol(FindSymbolRequest {
@@ -462,14 +459,14 @@ impl Biskit {
                     .min(self.inner.settings.tools.max_listing_entries),
             })
             .await
-            .map_err(fail)?)
+            .map_err(fail("find_symbol"))?)
     }
 
     #[tool(description = "Finds where a symbol is declared.")]
     async fn find_declaration(
         &self,
         Parameters(request): Parameters<FindDeclarationRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> ToolResult {
         let query = SymbolQuery::new(&self.inner.language_server);
         ok(&query
             .find_declaration(
@@ -478,14 +475,14 @@ impl Biskit {
                 request.include_body,
             )
             .await
-            .map_err(fail)?)
+            .map_err(fail("find_declaration"))?)
     }
 
     #[tool(description = "Finds every symbol that references the given symbol.")]
     async fn find_referencing_symbols(
         &self,
         Parameters(request): Parameters<SymbolLocationRequest>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> ToolResult {
         let query = SymbolQuery::new(&self.inner.language_server);
         ok(&query
             .find_referencing_symbols(
@@ -494,7 +491,7 @@ impl Biskit {
                 self.inner.settings.tools.max_listing_entries,
             )
             .await
-            .map_err(fail)?)
+            .map_err(fail("find_referencing_symbols"))?)
     }
 
     #[tool(
@@ -503,8 +500,9 @@ impl Biskit {
     async fn get_file_diagnostics(
         &self,
         Parameters(request): Parameters<FileDiagnosticsRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let severity = severity_from_input(request.min_severity).map_err(fail)?;
+    ) -> ToolResult {
+        let severity =
+            severity_from_input(request.min_severity).map_err(fail("get_file_diagnostics"))?;
         let query = SymbolQuery::new(&self.inner.language_server);
         ok(&query
             .file_diagnostics(
@@ -514,7 +512,7 @@ impl Biskit {
                 severity,
             )
             .await
-            .map_err(fail)?)
+            .map_err(fail("get_file_diagnostics"))?)
     }
 
     #[tool(
@@ -523,8 +521,9 @@ impl Biskit {
     async fn get_symbol_diagnostics(
         &self,
         Parameters(request): Parameters<SymbolDiagnosticsRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let severity = severity_from_input(request.min_severity).map_err(fail)?;
+    ) -> ToolResult {
+        let severity =
+            severity_from_input(request.min_severity).map_err(fail("get_symbol_diagnostics"))?;
         let query = SymbolQuery::new(&self.inner.language_server);
         ok(&query
             .symbol_diagnostics(
@@ -534,7 +533,7 @@ impl Biskit {
                 severity,
             )
             .await
-            .map_err(fail)?)
+            .map_err(fail("get_symbol_diagnostics"))?)
     }
 
     #[tool(
@@ -543,8 +542,12 @@ impl Biskit {
     async fn restart_language_server(
         &self,
         Parameters(NoArguments {}): Parameters<NoArguments>,
-    ) -> Result<CallToolResult, McpError> {
-        self.inner.language_server.restart().await.map_err(fail)?;
+    ) -> ToolResult {
+        self.inner
+            .language_server
+            .restart()
+            .await
+            .map_err(fail("restart_language_server"))?;
         text("Language server restarted.")
     }
 }
