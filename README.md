@@ -138,12 +138,11 @@ your-project/
     .gitignore
     settings.yml
     settings.local.yml
-    cache/
     memories/
 ```
 
 `settings.yml` is shared with your team and belongs in version control. `settings.local.yml` holds
-personal overrides, takes priority, and is gitignored along with `cache/`.
+personal overrides, takes priority, and is gitignored.
 
 Biskit downloads the pinned [luau-lsp-carpenter](https://github.com/Sawhorse-Interactive/luau-lsp-carpenter)
 release on first run, verifies its SHA-256 digest, and caches it per version in your user cache
