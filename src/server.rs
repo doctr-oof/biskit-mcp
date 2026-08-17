@@ -525,6 +525,17 @@ impl Biskit {
     }
 }
 
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for Biskit {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions(prompts::connection_instructions(
+                self.inner.settings.project.memory_only,
+            ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,16 +574,5 @@ mod tests {
         ] {
             assert!(biskit.tool_router.has_route(name), "missing {name}");
         }
-    }
-}
-
-#[tool_handler(router = self.tool_router)]
-impl ServerHandler for Biskit {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::from_build_env())
-            .with_instructions(prompts::connection_instructions(
-                self.inner.settings.project.memory_only,
-            ))
     }
 }
