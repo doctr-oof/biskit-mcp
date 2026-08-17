@@ -8,9 +8,23 @@ repository = "https://github.com/doctr-oof/biskit-mcp"
 license = "MIT"
 readme = "README.md"
 
+[lib]
+name = "biskit_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "biskit-mcp"
 path = "src/main.rs"
+
+[[bench]]
+name = "hot_paths"
+path = "benches/hot_paths.rs"
+harness = false
+
+[[bench]]
+name = "end_to_end"
+path = "benches/end_to_end.rs"
+harness = false
 
 [dependencies]
 rmcp = { version = "3.1.2", default-features = false, features = ["server", "macros", "transport-io"] }
@@ -25,6 +39,7 @@ tar = "0.4"
 flate2 = "1.1"
 ignore = "0.4.33"
 globset = "0.4.20"
+memchr = "2.7"
 regex = "1.13"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
