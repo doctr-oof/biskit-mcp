@@ -33,8 +33,10 @@ struct Inner {
 /// the message itself instead of an `MCP error -32602:` envelope.
 type ToolResult = Result<CallToolResult, String>;
 
+/// Results are serialised compactly. Pretty printing costs the caller a newline and a growing
+/// indent per field for no information gain.
 fn ok<T: Serialize>(value: &T) -> ToolResult {
-    let rendered = serde_json::to_string_pretty(value)
+    let rendered = serde_json::to_string(value)
         .map_err(|error| format!("failed to serialise the tool result: {error}"))?;
     Ok(CallToolResult::success(vec![ContentBlock::text(rendered)]))
 }
