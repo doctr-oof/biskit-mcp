@@ -50,6 +50,8 @@ When file has two symbols of same name, `get_symbols_overview` labels them `User
 
 `symbols` is keyed by file path, and each symbol under it carries no path of its own — path comes from key it sits under. `find_declaration` returns same file-keyed shape. `get_symbols_overview` returns bare list, since you supplied file yourself.
 
+`list_dir` returns `{ base, directories, files }`. `base` is directory you listed; every entry named relative to it. Join with `/` to get project-relative path: `base: "src/Services"` plus entry `PlayerService.luau` is `src/Services/PlayerService.luau`. `find_file` and `search_for_pattern` still answer with full project-relative paths.
+
 Top-level symbol in result carries full name path. Nested symbol under `children` carries only own leaf name, because ancestry already spelled by chain it sits under. Join with `/` to address it: child `update` under `PlayerService` is `PlayerService/update`.
 
 ## After you edit code

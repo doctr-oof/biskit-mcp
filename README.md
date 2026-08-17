@@ -239,6 +239,11 @@ that defines forty matches spells its path once rather than forty times. `find_d
 with the same file-keyed shape. `get_symbols_overview` answers with a bare list, since the caller
 supplied the file.
 
+`list_dir` answers with `{ base, directories, files }`. `base` is the directory that was listed and
+every entry is named relative to it, so a deep directory spells its prefix once instead of once per
+entry. Join the two with `/` for a project-relative path. `find_file` and `search_for_pattern` still
+answer with full project-relative paths, because their results are not confined to one directory.
+
 A symbol at the top of a result carries its full name path. A symbol nested under `children` carries
 only its own leaf name, because the chain of parents above it already spells the ancestry out. Join
 them with `/` to address one: `update` under `PlayerService` is `PlayerService/update`.

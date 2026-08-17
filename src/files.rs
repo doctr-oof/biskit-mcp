@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use globset::{Glob, GlobMatcher};
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
@@ -26,6 +26,9 @@ pub struct FileTools {
 
 #[derive(Debug, Default, Serialize)]
 pub struct DirectoryListing {
+    /// The listed directory, relative to the project root. Entries below are relative to this,
+    /// so the prefix is spelled once rather than once per entry.
+    pub base: String,
     pub directories: Vec<String>,
     pub files: Vec<String>,
     /// True when `max_listing_entries` cut the listing short. Omitted when false.
@@ -69,7 +72,10 @@ impl FileTools {
         let base = self.project.resolve(relative_path)?;
         ensure_directory(&base, relative_path)?;
 
-        let mut listing = DirectoryListing::default();
+        let mut listing = DirectoryListing {
+            base: self.base_label(&base)?,
+            ..Default::default()
+        };
         let limit = self.settings.tools.max_listing_entries;
 
         let mut walker = self.walk_builder(&base);
@@ -86,7 +92,7 @@ impl FileTools {
                 listing.truncated = true;
                 break;
             }
-            let relative = self.project.relativize(entry.path())?;
+            let relative = relativize_to(entry.path(), &base)?;
             if entry.file_type().is_some_and(|kind| kind.is_dir()) {
                 listing.directories.push(relative);
             } else {
@@ -219,6 +225,16 @@ impl FileTools {
         Ok(result)
     }
 
+    /// The project-relative label for a listed directory. The root relativizes to the empty
+    /// string, which is spelled "." the same way the caller asks for it.
+    fn base_label(&self, base: &Path) -> Result<String> {
+        let relative = self.project.relativize(base)?;
+        if relative.is_empty() {
+            return Ok(".".to_string());
+        }
+        Ok(relative)
+    }
+
     fn walk_builder(&self, base: &Path) -> WalkBuilder {
         let mut builder = WalkBuilder::new(base);
         builder
@@ -238,6 +254,13 @@ impl FileTools {
         });
         builder
     }
+}
+
+fn relativize_to(path: &Path, base: &Path) -> Result<String> {
+    let stripped = path
+        .strip_prefix(base)
+        .with_context(|| format!("path is outside the listed directory: {}", path.display()))?;
+    Ok(crate::project::normalize_separators(stripped))
 }
 
 fn ensure_directory(base: &Path, relative_path: &str) -> Result<()> {
@@ -285,5 +308,46 @@ fn line_index_for(line_starts: &[usize], offset: usize) -> usize {
     match line_starts.binary_search(&offset) {
         Ok(index) => index,
         Err(index) => index.saturating_sub(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open() -> (tempfile::TempDir, FileTools) {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("src").join("Services");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("PlayerService.luau"), "return {}\n").unwrap();
+        std::fs::write(dir.path().join("src").join("init.luau"), "return {}\n").unwrap();
+
+        let project = Project::open(dir.path()).unwrap();
+        (dir, FileTools::new(project, Settings::default()))
+    }
+
+    #[test]
+    fn entries_are_named_relative_to_the_listed_directory() {
+        let (_dir, files) = open();
+        let listing = files.list_dir("src", true).unwrap();
+
+        assert_eq!(listing.base, "src");
+        assert_eq!(listing.directories, vec!["Services".to_string()]);
+        assert_eq!(
+            listing.files,
+            vec![
+                "Services/PlayerService.luau".to_string(),
+                "init.luau".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn the_project_root_is_labelled_as_a_dot() {
+        let (_dir, files) = open();
+        let listing = files.list_dir(".", false).unwrap();
+
+        assert_eq!(listing.base, ".");
+        assert_eq!(listing.directories, vec!["src".to_string()]);
     }
 }
