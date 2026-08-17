@@ -12,6 +12,11 @@ pub struct SymbolNode {
     pub range: Range,
     pub selection_range: Range,
     pub children: Vec<SymbolNode>,
+    /// Set on a symbol nested under the owner its own name named, rather than under a symbol the
+    /// language server itself reported it inside. A member is worth showing whatever its kind,
+    /// where a local declared inside a function body is not.
+    #[serde(default)]
+    pub member: bool,
 }
 
 impl SymbolNode {
@@ -54,17 +59,34 @@ impl SymbolNode {
         }
     }
 
-    /// Deepest symbol whose range covers `position`.
+    /// Tightest symbol whose range covers `position`.
+    ///
+    /// A member nested under its owner is declared elsewhere in the file than the owner is, so the
+    /// search cannot stop descending at a parent whose own range misses the position; the tightest
+    /// range wins instead of the deepest nesting.
     pub fn innermost_at(nodes: &[SymbolNode], position: Position) -> Option<&SymbolNode> {
         let mut best: Option<&SymbolNode> = None;
         for node in nodes {
-            if !node.contains(position) {
-                continue;
+            let candidate = match SymbolNode::innermost_at(&node.children, position) {
+                Some(nested) => nested,
+                None if node.contains(position) => node,
+                None => continue,
+            };
+            if best.is_none_or(|current| span(current.range) >= span(candidate.range)) {
+                best = Some(candidate);
             }
-            best = Some(SymbolNode::innermost_at(&node.children, position).unwrap_or(node));
         }
         best
     }
+}
+
+/// How much ground a range covers, for choosing between two symbols that both cover a position.
+fn span(range: Range) -> (u32, u32) {
+    let lines = range.end.line.saturating_sub(range.start.line);
+    if lines == 0 {
+        return (0, range.end.character.saturating_sub(range.start.character));
+    }
+    (lines, range.end.character)
 }
 
 /// Finds `needle` in `haystack` only where it stands alone as an identifier.
@@ -92,31 +114,107 @@ fn find_identifier(haystack: &str, needle: &str) -> Option<usize> {
 pub fn build_tree(response: DocumentSymbolResponse) -> Vec<SymbolNode> {
     match response {
         DocumentSymbolResponse::Nested(symbols) => convert_siblings(&symbols, ""),
-        DocumentSymbolResponse::Flat(symbols) => symbols
-            .into_iter()
-            .map(|symbol| {
-                let name_path = match symbol.container_name.filter(|name| !name.is_empty()) {
-                    Some(container) => format!("{container}/{}", symbol.name),
-                    None => symbol.name.clone(),
-                };
-                SymbolNode {
-                    name: symbol.name,
-                    name_path,
-                    kind: symbol.kind,
-                    detail: None,
-                    range: symbol.location.range,
-                    selection_range: symbol.location.range,
-                    children: Vec::new(),
-                }
-            })
-            .collect(),
+        DocumentSymbolResponse::Flat(symbols) => nest_members(
+            symbols
+                .into_iter()
+                .map(|symbol| {
+                    let name_path = match symbol.container_name.filter(|name| !name.is_empty()) {
+                        Some(container) => format!("{container}/{}", symbol.name),
+                        None => symbol.name.clone(),
+                    };
+                    SymbolNode {
+                        name: symbol.name,
+                        name_path,
+                        kind: symbol.kind,
+                        detail: None,
+                        range: symbol.location.range,
+                        selection_range: symbol.location.range,
+                        children: Vec::new(),
+                        member: false,
+                    }
+                })
+                .collect(),
+        ),
     }
+}
+
+/// Nests each symbol under the owner its own name names.
+///
+/// luau-lsp reports table members as flat siblings carrying their owner in the name
+/// ("Config.load"), so the hierarchy the name paths spell out is not the hierarchy the response
+/// has. Rebuilding it is what gives `depth` something to descend into, and every name path is
+/// preserved exactly, so a symbol is addressed the same way before and after.
+///
+/// A member whose owner is not itself reported stays where it is: dropping it under a parent that
+/// does not exist would hide it from the top level with nothing to find it under.
+fn nest_members(nodes: Vec<SymbolNode>) -> Vec<SymbolNode> {
+    if nodes.len() < 2 || !nodes.iter().any(|node| node.name_path.contains('/')) {
+        return nodes;
+    }
+
+    let mut parents = vec![None; nodes.len()];
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    {
+        let mut owners = std::collections::HashMap::<&str, usize>::with_capacity(nodes.len());
+        for (index, node) in nodes.iter().enumerate() {
+            owners.entry(node.name_path.as_str()).or_insert(index);
+        }
+        for (index, node) in nodes.iter().enumerate() {
+            // Every owner has a strictly shorter name path than the symbol it owns, so the links
+            // can never close a cycle.
+            if let Some(parent) = owner_index(&owners, &node.name_path, index) {
+                parents[index] = Some(parent);
+                children[parent].push(index);
+            }
+        }
+    }
+
+    let roots: Vec<usize> = (0..nodes.len())
+        .filter(|index| parents[*index].is_none())
+        .collect();
+    let mut slots: Vec<Option<SymbolNode>> = nodes.into_iter().map(Some).collect();
+    roots
+        .into_iter()
+        .filter_map(|index| take_subtree(index, &children, &mut slots))
+        .collect()
+}
+
+/// Nearest reported ancestor of `name_path`, longest match first, so `A/B/C` lands under `A/B`
+/// where that exists and under `A` where it does not.
+fn owner_index(
+    owners: &std::collections::HashMap<&str, usize>,
+    name_path: &str,
+    index: usize,
+) -> Option<usize> {
+    let mut candidate = name_path;
+    while let Some((prefix, _)) = candidate.rsplit_once('/') {
+        match owners.get(prefix) {
+            Some(&owner) if owner != index => return Some(owner),
+            _ => candidate = prefix,
+        }
+    }
+    None
+}
+
+fn take_subtree(
+    index: usize,
+    children: &[Vec<usize>],
+    slots: &mut Vec<Option<SymbolNode>>,
+) -> Option<SymbolNode> {
+    let mut node = slots[index].take()?;
+    for &child in &children[index] {
+        if let Some(mut nested) = take_subtree(child, children, slots) {
+            nested.member = true;
+            node.children.push(nested);
+        }
+    }
+    Some(node)
 }
 
 fn convert_siblings(symbols: &[DocumentSymbol], prefix: &str) -> Vec<SymbolNode> {
     let disambiguated = disambiguate(symbols);
 
-    symbols
+    let converted = symbols
         .iter()
         .zip(disambiguated)
         .map(|(symbol, name)| {
@@ -151,9 +249,12 @@ fn convert_siblings(symbols: &[DocumentSymbol], prefix: &str) -> Vec<SymbolNode>
                 detail: symbol.detail.clone(),
                 range: symbol.range,
                 selection_range: symbol.selection_range,
+                member: false,
             }
         })
-        .collect()
+        .collect();
+
+    nest_members(converted)
 }
 
 /// Siblings sharing a name get a `[n]` suffix so each name path stays addressable.
@@ -370,6 +471,79 @@ mod tests {
     fn a_lone_sibling_is_never_indexed() {
         let tree = build_tree(DocumentSymbolResponse::Nested(vec![symbol("only", vec![])]));
         assert_eq!(tree[0].name_path, "only");
+    }
+
+    #[test]
+    fn flat_luau_members_nest_under_their_owner() {
+        let tree = build_tree(DocumentSymbolResponse::Nested(vec![
+            symbol("RebirthConfig", vec![]),
+            symbol("RebirthConfig.MAX_LEVEL", vec![]),
+            symbol("RebirthConfig:Apply", vec![]),
+        ]));
+
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].name_path, "RebirthConfig");
+        let names: Vec<&str> = tree[0]
+            .children
+            .iter()
+            .map(|child| child.name_path.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["RebirthConfig/MAX_LEVEL", "RebirthConfig/Apply"]
+        );
+        assert!(tree[0].children.iter().all(|child| child.member));
+        assert!(!tree[0].member);
+    }
+
+    #[test]
+    fn a_member_nests_under_the_deepest_reported_owner() {
+        let tree = build_tree(DocumentSymbolResponse::Nested(vec![
+            symbol("Config", vec![]),
+            symbol("Config.Limits", vec![]),
+            symbol("Config.Limits.Max", vec![]),
+            symbol("Config.Other.Deep", vec![]),
+        ]));
+
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].children.len(), 2);
+        assert_eq!(tree[0].children[0].name_path, "Config/Limits");
+        assert_eq!(
+            tree[0].children[0].children[0].name_path,
+            "Config/Limits/Max"
+        );
+        assert_eq!(tree[0].children[1].name_path, "Config/Other/Deep");
+    }
+
+    #[test]
+    fn a_member_whose_owner_is_unreported_stays_top_level() {
+        let tree = build_tree(DocumentSymbolResponse::Nested(vec![
+            symbol("Elsewhere.helper", vec![]),
+            symbol("main", vec![]),
+        ]));
+
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].name_path, "Elsewhere/helper");
+        assert_eq!(tree[1].name_path, "main");
+    }
+
+    #[test]
+    fn innermost_at_reaches_a_member_outside_its_owner_range() {
+        let mut owner = symbol("Config", vec![]);
+        owner.range = range(0, 0);
+        let mut member = symbol("Config.load", vec![]);
+        member.range = range(10, 20);
+
+        let tree = build_tree(DocumentSymbolResponse::Nested(vec![owner, member]));
+        let found = SymbolNode::innermost_at(
+            &tree,
+            Position {
+                line: 15,
+                character: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(found.name_path, "Config/load");
     }
 
     #[test]

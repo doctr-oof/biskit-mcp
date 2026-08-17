@@ -654,9 +654,11 @@ fn render_node(
             depth: options.depth - 1,
             ..options
         };
+        // A member of a table is part of what the table is, whatever kind the server gave it. The
+        // low-level filter is aimed at locals declared inside a body, which are noise here.
         node.children
             .iter()
-            .filter(|child| !is_low_level_kind(child.kind))
+            .filter(|child| child.member || !is_low_level_kind(child.kind))
             .map(|child| render_child(child, lines, nested))
             .collect()
     };
@@ -784,6 +786,7 @@ mod tests {
             },
             selection_range: range(start_line),
             children: Vec::new(),
+            member: false,
         }
     }
 
