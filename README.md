@@ -33,6 +33,10 @@ macOS and Linux:
 curl -fsSL https://raw.githubusercontent.com/doctr-oof/biskit-mcp/main/install.sh | sh
 ```
 
+On Windows use the PowerShell installer even if you normally work in Git Bash or the VS Code
+terminal. The Windows build ships as a .zip and the install registers your user PATH, neither of
+which the shell installer does. WSL is the exception, since that is a real Linux target.
+
 Both installers verify the download against the SHA256SUMS published with the release and refuse to
 install on a mismatch.
 

@@ -46,6 +46,17 @@ detect_asset() {
 	case "$os" in
 	Darwin) platform="macos" ;;
 	Linux) platform="linux" ;;
+	MINGW* | MSYS* | CYGWIN* | Windows_NT)
+		echo "error: this installer targets macOS and Linux, and $os is a Windows shell." >&2
+		echo "" >&2
+		echo "Windows builds ship as a .zip and the install also registers your user PATH," >&2
+		echo "so run the PowerShell installer instead:" >&2
+		echo "" >&2
+		echo "  powershell -NoProfile -Command \"irm https://raw.githubusercontent.com/${REPOSITORY}/main/install.ps1 | iex\"" >&2
+		echo "" >&2
+		echo "If you meant to install the Linux build, run this from WSL rather than Git Bash." >&2
+		exit 1
+		;;
 	*) fail "unsupported operating system: $os" ;;
 	esac
 
