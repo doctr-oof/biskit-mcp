@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -12,7 +12,13 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
-type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, ResponseError>>>>>;
+/// Every critical section here is one non-async insert or remove, so a synchronous mutex fits
+/// better than an async one: no task state machine, no yield point, no lock held across an await.
+type PendingMap =
+    Arc<std::sync::Mutex<HashMap<i64, oneshot::Sender<Result<Value, ResponseError>>>>>;
+
+/// Reported to a waiting request when the read loop sees the server go away.
+pub const TERMINATED_CODE: i64 = -32000;
 
 #[derive(Debug, Clone)]
 pub struct ResponseError {
@@ -31,6 +37,44 @@ impl std::fmt::Display for ResponseError {
 }
 
 impl std::error::Error for ResponseError {}
+
+/// The language server stopped answering at all, as opposed to failing one request.
+///
+/// The distinction matters to any caller that issues a request per file: one file's parse failure
+/// is worth skipping past, whereas a server that has stopped answering will burn a full timeout on
+/// every remaining file for no possible result.
+#[derive(Debug, Clone)]
+pub struct Unavailable {
+    pub method: String,
+    pub detail: String,
+}
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "language server did not answer {}: {}",
+            self.method, self.detail
+        )
+    }
+}
+
+impl std::error::Error for Unavailable {}
+
+/// True when `error` means the server is gone rather than that one request failed.
+pub fn is_unavailable(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Unavailable>().is_some()
+        || error
+            .downcast_ref::<ResponseError>()
+            .is_some_and(|response| response.code == TERMINATED_CODE)
+}
+
+fn unavailable(method: &str, detail: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(Unavailable {
+        method: method.to_string(),
+        detail: detail.into(),
+    })
+}
 
 pub enum ServerEvent {
     LogMessage(String),
@@ -82,7 +126,7 @@ impl LspConnection {
             .take()
             .ok_or_else(|| anyhow!("language server stderr unavailable"))?;
 
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let reader = tokio::spawn(read_loop(
             BufReader::new(stdout),
             Arc::clone(&pending),
@@ -135,7 +179,7 @@ impl LspConnection {
     ) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(id, sender);
+        pending_insert(&self.pending, id, sender);
 
         let message = json!({
             "jsonrpc": "2.0",
@@ -145,20 +189,20 @@ impl LspConnection {
         });
 
         if let Err(error) = write_message(&self.stdin, &message).await {
-            self.pending.lock().await.remove(&id);
+            pending_remove(&self.pending, id);
             return Err(error);
         }
 
         match timeout(duration, receiver).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(error))) => Err(error.into()),
-            Ok(Err(_)) => bail!("language server closed the connection during {method}"),
+            Ok(Err(_)) => Err(unavailable(method, "the connection closed")),
             Err(_) => {
-                self.pending.lock().await.remove(&id);
-                bail!(
-                    "language server did not answer {method} within {}ms",
-                    duration.as_millis()
-                )
+                pending_remove(&self.pending, id);
+                Err(unavailable(
+                    method,
+                    format!("no response within {}ms", duration.as_millis()),
+                ))
             }
         }
     }
@@ -191,13 +235,33 @@ impl LspConnection {
     }
 }
 
+fn pending_insert(
+    pending: &PendingMap,
+    id: i64,
+    sender: oneshot::Sender<Result<Value, ResponseError>>,
+) {
+    if let Ok(mut guard) = pending.lock() {
+        guard.insert(id, sender);
+    }
+}
+
+fn pending_remove(
+    pending: &PendingMap,
+    id: i64,
+) -> Option<oneshot::Sender<Result<Value, ResponseError>>> {
+    pending.lock().ok()?.remove(&id)
+}
+
+/// `ChildStdin` is an unbuffered pipe, so the header and the body go out as one write rather than
+/// as two syscalls plus a flush.
 async fn write_message(stdin: &Arc<Mutex<ChildStdin>>, message: &Value) -> Result<()> {
     let body = serde_json::to_vec(message)?;
+    let mut framed = Vec::with_capacity(body.len() + 32);
+    framed.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+    framed.extend_from_slice(&body);
+
     let mut guard = stdin.lock().await;
-    guard
-        .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
-        .await?;
-    guard.write_all(&body).await?;
+    guard.write_all(&framed).await?;
     guard.flush().await?;
     Ok(())
 }
@@ -209,15 +273,21 @@ async fn read_loop(
     events: mpsc::UnboundedSender<ServerEvent>,
     configuration: Value,
 ) {
+    // Both buffers are reused for the life of the connection: a `documentSymbol` response is
+    // large, and allocating and zero-filling a fresh buffer for each one is pure overhead.
+    let mut header = String::new();
+    let mut body: Vec<u8> = Vec::new();
+
     loop {
-        let Ok(Some(message)) = read_message(&mut stdout).await else {
+        let Ok(Some(message)) = read_message(&mut stdout, &mut header, &mut body).await else {
             let _ = events.send(ServerEvent::Exited);
-            let mut guard = pending.lock().await;
-            for (_, sender) in guard.drain() {
-                let _ = sender.send(Err(ResponseError {
-                    code: -32000,
-                    message: "language server terminated".to_string(),
-                }));
+            if let Ok(mut guard) = pending.lock() {
+                for (_, sender) in guard.drain() {
+                    let _ = sender.send(Err(ResponseError {
+                        code: TERMINATED_CODE,
+                        message: "language server terminated".to_string(),
+                    }));
+                }
             }
             return;
         };
@@ -248,7 +318,7 @@ async fn read_loop(
                     }),
                     None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
                 };
-                if let Some(sender) = pending.lock().await.remove(&id) {
+                if let Some(sender) = pending_remove(&pending, id) {
                     let _ = sender.send(outcome);
                 }
             }
@@ -289,22 +359,24 @@ fn handle_notification(method: &str, message: &Value, events: &mpsc::UnboundedSe
 
 async fn read_message(
     stdout: &mut BufReader<tokio::process::ChildStdout>,
+    header: &mut String,
+    body: &mut Vec<u8>,
 ) -> Result<Option<Value>> {
     let mut content_length: Option<usize> = None;
 
     loop {
-        let mut header = String::new();
-        let read = stdout.read_line(&mut header).await?;
+        header.clear();
+        let read = stdout.read_line(header).await?;
         if read == 0 {
             return Ok(None);
         }
-        let header = header.trim_end_matches(['\r', '\n']);
-        if header.is_empty() {
+        let line = header.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
             break;
         }
-        if let Some(value) = header
+        if let Some(value) = line
             .strip_prefix("Content-Length:")
-            .or_else(|| header.strip_prefix("content-length:"))
+            .or_else(|| line.strip_prefix("content-length:"))
         {
             content_length = Some(value.trim().parse()?);
         }
@@ -312,7 +384,8 @@ async fn read_message(
 
     let length =
         content_length.ok_or_else(|| anyhow!("language server message lacked Content-Length"))?;
-    let mut body = vec![0u8; length];
-    stdout.read_exact(&mut body).await?;
-    Ok(Some(serde_json::from_slice(&body)?))
+    body.clear();
+    body.resize(length, 0);
+    stdout.read_exact(body).await?;
+    Ok(Some(serde_json::from_slice(body)?))
 }

@@ -26,7 +26,7 @@ struct Inner {
     settings: Settings,
     memories: MemoryStore,
     files: FileTools,
-    language_server: LanguageServerHandle,
+    language_server: Arc<LanguageServerHandle>,
 }
 
 /// Tool failures travel back as `isError` results rather than JSON-RPC errors, so clients render
@@ -296,7 +296,7 @@ impl Biskit {
     pub fn new(project: Project, settings: Settings) -> Self {
         let memories = MemoryStore::new(project.clone());
         let files = FileTools::new(project.clone(), settings.clone());
-        let language_server = LanguageServerHandle::new(project, settings.clone());
+        let language_server = Arc::new(LanguageServerHandle::new(project, settings.clone()));
 
         let memory_only = settings.project.memory_only;
         let mut tool_router = Self::tool_router();
@@ -331,6 +331,12 @@ impl Biskit {
             }),
             tool_router,
         }
+    }
+
+    /// Brings the language server up in the background so the first LSP-backed tool call does not
+    /// pay for its startup. Does nothing in memory-only mode.
+    pub fn warm_up(&self) {
+        self.inner.language_server.warm_up();
     }
 
     pub async fn shutdown(&self) {

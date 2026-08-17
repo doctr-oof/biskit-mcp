@@ -157,7 +157,15 @@ fn convert_siblings(symbols: &[DocumentSymbol], prefix: &str) -> Vec<SymbolNode>
 }
 
 /// Siblings sharing a name get a `[n]` suffix so each name path stays addressable.
-fn disambiguate(symbols: &[DocumentSymbol]) -> Vec<String> {
+///
+/// Sibling groups with no duplicate at all are the overwhelming majority, and this runs for every
+/// group at every level of every scanned file, so the duplicate-free case avoids the hash maps
+/// entirely and hands back the names as they stand.
+pub fn disambiguate(symbols: &[DocumentSymbol]) -> Vec<String> {
+    if !has_duplicate_names(symbols) {
+        return symbols.iter().map(|symbol| symbol.name.clone()).collect();
+    }
+
     let mut totals = std::collections::HashMap::<&str, usize>::new();
     for symbol in symbols {
         *totals.entry(symbol.name.as_str()).or_default() += 1;
@@ -176,6 +184,28 @@ fn disambiguate(symbols: &[DocumentSymbol]) -> Vec<String> {
             rendered
         })
         .collect()
+}
+
+/// Sibling groups are short, so the quadratic scan beats building a set for the sizes that occur
+/// in practice; the set is only worth its allocation once a group is large.
+fn has_duplicate_names(symbols: &[DocumentSymbol]) -> bool {
+    const LINEAR_SCAN_LIMIT: usize = 16;
+
+    if symbols.len() < 2 {
+        return false;
+    }
+    if symbols.len() <= LINEAR_SCAN_LIMIT {
+        return symbols.iter().enumerate().any(|(index, symbol)| {
+            symbols[index + 1..]
+                .iter()
+                .any(|other| other.name == symbol.name)
+        });
+    }
+
+    let mut seen = std::collections::HashSet::with_capacity(symbols.len());
+    symbols
+        .iter()
+        .any(|symbol| !seen.insert(symbol.name.as_str()))
 }
 
 #[cfg(test)]
@@ -309,6 +339,37 @@ mod tests {
         assert_eq!(tree[0].name_path, "overloaded[0]");
         assert_eq!(tree[1].name_path, "overloaded[1]");
         assert_eq!(tree[2].name_path, "unique");
+    }
+
+    /// The fast path skips the counting maps, so both sides of its size threshold need covering.
+    #[test]
+    fn duplicates_are_found_in_groups_of_every_size() {
+        for size in [2usize, 8, 17, 64] {
+            let unique: Vec<DocumentSymbol> = (0..size)
+                .map(|index| symbol(&format!("unique{index}"), vec![]))
+                .collect();
+            assert!(
+                !has_duplicate_names(&unique),
+                "group of {size} unique names reported a duplicate"
+            );
+
+            let mut duplicated = unique.clone();
+            duplicated.push(symbol("unique0", vec![]));
+            assert!(
+                has_duplicate_names(&duplicated),
+                "group of {size} plus a repeat missed the duplicate"
+            );
+
+            let tree = build_tree(DocumentSymbolResponse::Nested(duplicated));
+            assert_eq!(tree[0].name_path, "unique0[0]");
+            assert_eq!(tree[size].name_path, "unique0[1]");
+        }
+    }
+
+    #[test]
+    fn a_lone_sibling_is_never_indexed() {
+        let tree = build_tree(DocumentSymbolResponse::Nested(vec![symbol("only", vec![])]));
+        assert_eq!(tree[0].name_path, "only");
     }
 
     #[test]

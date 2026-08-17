@@ -27,36 +27,62 @@ impl NamePathPattern {
         self.segments.is_empty()
     }
 
-    /// `candidate` is the full ancestor chain of a symbol, outermost first.
-    pub fn matches(&self, candidate: &[String]) -> bool {
-        if self.segments.is_empty() || candidate.is_empty() {
-            return false;
-        }
-        if self.segments.len() > candidate.len() {
+    pub fn segments(&self) -> &[String] {
+        &self.segments
+    }
+
+    pub fn is_absolute(&self) -> bool {
+        self.absolute
+    }
+
+    /// The literal text a file must contain for any symbol in it to satisfy this pattern.
+    ///
+    /// A symbol cannot be defined in a file whose bytes never spell its leaf name, so a candidate
+    /// file that lacks this string can be skipped without asking the language server about it.
+    /// Substring queries hold to the same rule: the queried substring is still spelled literally
+    /// inside the definition it is meant to find.
+    pub fn literal_filter(&self) -> Option<&str> {
+        let leaf = strip_overload_suffix(self.segments.last()?);
+        (!leaf.is_empty()).then_some(leaf)
+    }
+
+    /// `name_path` is the `/`-joined ancestor chain of a symbol, outermost first.
+    ///
+    /// Compared right to left so the chain never has to be split into owned segments: this runs
+    /// once per symbol node of every scanned file, which is the busiest loop in the crate.
+    pub fn matches(&self, name_path: &str) -> bool {
+        if self.segments.is_empty() || name_path.is_empty() {
             return false;
         }
 
-        let offset = candidate.len() - self.segments.len();
-        if self.absolute && offset != 0 {
-            return false;
-        }
-
-        let tail = &candidate[offset..];
         let last = self.segments.len() - 1;
-        self.segments.iter().enumerate().all(|(index, expected)| {
-            let raw = tail[index].as_str();
-            // An indexed query segment names one specific duplicate, so it is compared against
-            // the stored name with its suffix intact.
-            if has_overload_suffix(expected) {
-                return raw == expected;
+        let mut candidate = name_path.rsplit('/');
+
+        for (index, expected) in self.segments.iter().enumerate().rev() {
+            let Some(raw) = candidate.next() else {
+                return false;
+            };
+            if !segment_matches(expected, raw, index == last && self.substring_matching) {
+                return false;
             }
-            let actual = strip_overload_suffix(raw);
-            if index == last && self.substring_matching {
-                actual.contains(expected.as_str())
-            } else {
-                actual == expected
-            }
-        })
+        }
+
+        // An absolute pattern has to have consumed the whole chain, leaving no outer owner.
+        !(self.absolute && candidate.next().is_some())
+    }
+}
+
+fn segment_matches(expected: &str, raw: &str, substring: bool) -> bool {
+    // An indexed query segment names one specific duplicate, so it is compared against the stored
+    // name with its suffix intact.
+    if has_overload_suffix(expected) {
+        return raw == expected;
+    }
+    let actual = strip_overload_suffix(raw);
+    if substring {
+        actual.contains(expected)
+    } else {
+        actual == expected
     }
 }
 
@@ -87,8 +113,8 @@ fn has_overload_suffix(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn chain(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|part| part.to_string()).collect()
+    fn chain(parts: &[&str]) -> String {
+        parts.join("/")
     }
 
     #[test]
@@ -170,5 +196,36 @@ mod tests {
         let pattern = NamePathPattern::parse("UserInfo", false);
         assert!(pattern.matches(&chain(&["UserInfo[0]"])));
         assert!(pattern.matches(&chain(&["UserInfo[1]"])));
+    }
+
+    #[test]
+    fn an_empty_chain_matches_nothing() {
+        assert!(!NamePathPattern::parse("update", false).matches(""));
+        assert!(!NamePathPattern::parse("", false).matches("update"));
+    }
+
+    #[test]
+    fn a_longer_pattern_than_chain_does_not_match() {
+        let pattern = NamePathPattern::parse("Module/PlayerService/update", false);
+        assert!(!pattern.matches(&chain(&["PlayerService", "update"])));
+        assert!(pattern.matches(&chain(&["Module", "PlayerService", "update"])));
+        assert!(pattern.matches(&chain(&["Outer", "Module", "PlayerService", "update"])));
+    }
+
+    #[test]
+    fn literal_filter_names_the_leaf_without_its_suffix() {
+        assert_eq!(
+            NamePathPattern::parse("PlayerUtils:GetPlayerMaid", false).literal_filter(),
+            Some("GetPlayerMaid")
+        );
+        assert_eq!(
+            NamePathPattern::parse("UserInfo[1]", false).literal_filter(),
+            Some("UserInfo")
+        );
+        assert_eq!(
+            NamePathPattern::parse("Player", true).literal_filter(),
+            Some("Player")
+        );
+        assert_eq!(NamePathPattern::parse("///", false).literal_filter(), None);
     }
 }
