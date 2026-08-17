@@ -131,7 +131,10 @@ async fn the_prefilter_never_changes_which_symbols_are_found() {
 /// A symbol the project actually defines, so the "name that exists" case has something to look for.
 async fn first_defined_symbol(handle: &LanguageServerHandle, files: &[String]) -> Option<String> {
     for file in files.iter().take(25) {
-        let Ok(symbols) = SymbolQuery::new(handle).symbols_overview(file, 0, false).await else {
+        let Ok(symbols) = SymbolQuery::new(handle)
+            .symbols_overview(file, 0, false)
+            .await
+        else {
             continue;
         };
         if let Some(name) = symbols
