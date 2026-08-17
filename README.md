@@ -234,6 +234,11 @@ labels can be passed straight back in, which is the only way to address one of t
 cut the result set short. The flag is omitted when nothing was cut, so an absent `truncated` means a
 complete result. `list_dir` and `search_for_pattern` report truncation the same way.
 
+`symbols` is keyed by file path, and the symbols under a key carry no path of their own, so a file
+that defines forty matches spells its path once rather than forty times. `find_declaration` answers
+with the same file-keyed shape. `get_symbols_overview` answers with a bare list, since the caller
+supplied the file.
+
 ### Memories
 
 Memories are plain markdown under `.biskit/memories/`, nestable to any depth. Reference one from

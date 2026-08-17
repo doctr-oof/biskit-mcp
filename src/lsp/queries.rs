@@ -22,7 +22,6 @@ pub struct SymbolMatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_path: Option<String>,
     pub kind: String,
-    pub relative_path: String,
     pub start_line: u32,
     pub end_line: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,9 +32,13 @@ pub struct SymbolMatch {
     pub children: Vec<SymbolMatch>,
 }
 
+/// Symbols keyed by the file that defines them, so a path is spelled once per file rather than
+/// once per symbol.
+pub type SymbolsByFile = BTreeMap<String, Vec<SymbolMatch>>;
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SymbolSearchResult {
-    pub symbols: Vec<SymbolMatch>,
+    pub symbols: SymbolsByFile,
     /// True when `max_matches` cut the result set short. Omitted when false.
     #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
@@ -134,7 +137,7 @@ impl<'a> SymbolQuery<'a> {
         // Collecting one past the cap is what makes a complete result set distinguishable
         // from a truncated one.
         let probe = request.max_matches.saturating_add(1);
-        let mut matches = Vec::new();
+        let mut matches: Vec<(String, SymbolMatch)> = Vec::new();
 
         for path in files {
             if matches.len() >= probe {
@@ -146,21 +149,22 @@ impl<'a> SymbolQuery<'a> {
             let content = session.ensure_open(&path).await?;
             let relative = self.project().relativize(&path)?;
 
+            let mut found = Vec::new();
             collect_matches(
                 &symbols,
                 &pattern,
                 &request,
-                probe,
-                &relative,
+                probe - matches.len(),
                 &content,
-                &mut matches,
+                &mut found,
             );
+            matches.extend(found.into_iter().map(|symbol| (relative.clone(), symbol)));
         }
 
         let truncated = matches.len() > request.max_matches;
         matches.truncate(request.max_matches);
         Ok(SymbolSearchResult {
-            symbols: matches,
+            symbols: group_by_file(matches),
             truncated,
         })
     }
@@ -181,7 +185,7 @@ impl<'a> SymbolQuery<'a> {
         // only top-level symbols are variables would otherwise look like an empty file.
         Ok(symbols
             .iter()
-            .map(|symbol| render(symbol, relative_path, &content, depth, false))
+            .map(|symbol| render(symbol, &content, depth, false))
             .collect())
     }
 
@@ -241,7 +245,7 @@ impl<'a> SymbolQuery<'a> {
         name_path: &str,
         relative_path: &str,
         include_body: bool,
-    ) -> Result<Vec<SymbolMatch>> {
+    ) -> Result<SymbolsByFile> {
         let session = self.handle.session().await?;
         let (path, symbol, position) = self.locate_one(&session, name_path, relative_path).await?;
         let locations = session.definition(&path, position).await?;
@@ -251,7 +255,10 @@ impl<'a> SymbolQuery<'a> {
         if locations.is_empty() {
             let content = session.ensure_open(&path).await?;
             let relative = self.project().relativize(&path)?;
-            return Ok(vec![render(&symbol, &relative, &content, 0, include_body)]);
+            return Ok(SymbolsByFile::from([(
+                relative,
+                vec![render(&symbol, &content, 0, include_body)],
+            )]));
         }
 
         self.render_locations(&session, locations, include_body)
@@ -307,8 +314,8 @@ impl<'a> SymbolQuery<'a> {
         session: &Session,
         locations: Vec<Location>,
         include_body: bool,
-    ) -> Result<Vec<SymbolMatch>> {
-        let mut rendered = Vec::new();
+    ) -> Result<SymbolsByFile> {
+        let mut rendered = SymbolsByFile::new();
         for location in locations {
             let Ok(target) = uri::to_path(&location.uri) else {
                 continue;
@@ -325,12 +332,11 @@ impl<'a> SymbolQuery<'a> {
                 None
             };
 
-            rendered.push(SymbolMatch {
+            rendered.entry(relative).or_default().push(SymbolMatch {
                 name_path: node.map(|found| found.name_path.clone()),
                 kind: node
                     .map(|found| found.kind_label().to_string())
                     .unwrap_or_else(|| "Unknown".to_string()),
-                relative_path: relative,
                 start_line: location.range.start.line + 1,
                 end_line: location.range.end.line + 1,
                 detail: node.and_then(|found| found.detail.clone()),
@@ -444,12 +450,19 @@ fn merge_severities(
     }
 }
 
+fn group_by_file(matches: Vec<(String, SymbolMatch)>) -> SymbolsByFile {
+    let mut grouped = SymbolsByFile::new();
+    for (relative_path, symbol) in matches {
+        grouped.entry(relative_path).or_default().push(symbol);
+    }
+    grouped
+}
+
 fn collect_matches(
     nodes: &[SymbolNode],
     pattern: &NamePathPattern,
     request: &FindSymbolRequest,
     limit: usize,
-    relative_path: &str,
     content: &str,
     out: &mut Vec<SymbolMatch>,
 ) {
@@ -462,47 +475,26 @@ fn collect_matches(
             && !request.exclude_kinds.contains(&node.kind);
 
         if kind_allowed && pattern.matches(&node.ancestors()) {
-            out.push(render(
-                node,
-                relative_path,
-                content,
-                request.depth,
-                request.include_body,
-            ));
+            out.push(render(node, content, request.depth, request.include_body));
         }
-        collect_matches(
-            &node.children,
-            pattern,
-            request,
-            limit,
-            relative_path,
-            content,
-            out,
-        );
+        collect_matches(&node.children, pattern, request, limit, content, out);
     }
 }
 
-fn render(
-    node: &SymbolNode,
-    relative_path: &str,
-    content: &str,
-    depth: u32,
-    include_body: bool,
-) -> SymbolMatch {
+fn render(node: &SymbolNode, content: &str, depth: u32, include_body: bool) -> SymbolMatch {
     let children = if depth == 0 {
         Vec::new()
     } else {
         node.children
             .iter()
             .filter(|child| !is_low_level_kind(child.kind))
-            .map(|child| render(child, relative_path, content, depth - 1, false))
+            .map(|child| render(child, content, depth - 1, false))
             .collect()
     };
 
     SymbolMatch {
         name_path: Some(node.name_path.clone()),
         kind: node.kind_label().to_string(),
-        relative_path: relative_path.to_string(),
         start_line: node.range.start.line + 1,
         end_line: node.range.end.line + 1,
         detail: node.detail.clone(),
