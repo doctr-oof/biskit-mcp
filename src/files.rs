@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::bail_hint;
 use crate::config::Settings;
 use crate::errors::hinted;
+use crate::lines::LineIndex;
 use crate::project::Project;
 
 const LUAU_EXTENSIONS: [&str; 3] = ["luau", "lua", "luaurc"];
@@ -78,7 +79,7 @@ impl FileTools {
         };
         let limit = self.settings.tools.max_listing_entries;
 
-        let mut walker = self.walk_builder(&base);
+        let mut walker = self.walk_builder(&base)?;
         if !recursive {
             walker.max_depth(Some(1));
         }
@@ -88,10 +89,6 @@ impl FileTools {
             if entry.path() == base {
                 continue;
             }
-            if listing.directories.len() + listing.files.len() >= limit {
-                listing.truncated = true;
-                break;
-            }
             let relative = relativize_to(entry.path(), &base)?;
             if entry.file_type().is_some_and(|kind| kind.is_dir()) {
                 listing.directories.push(relative);
@@ -100,8 +97,12 @@ impl FileTools {
             }
         }
 
+        // Sorting before truncating is what makes a capped listing reproducible. The walker's
+        // traversal order is not lexicographic, so cutting the walk short at the cap returned an
+        // arbitrary subset that could differ between two calls on an unchanged directory.
         listing.directories.sort();
         listing.files.sort();
+        listing.truncated = truncate_listing(&mut listing.directories, &mut listing.files, limit);
         Ok(listing)
     }
 
@@ -112,18 +113,23 @@ impl FileTools {
         let limit = self.settings.tools.max_listing_entries;
 
         let mut found = Vec::new();
-        for entry in self.walk_builder(&base).build() {
+        for entry in self.walk_builder(&base)?.build() {
             let entry = entry?;
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let relative = self.project.relativize(entry.path())?;
-            if matcher.is_match(&name) || matcher.is_match(&relative) {
-                found.push(relative);
-                if found.len() >= limit {
-                    break;
-                }
+            // Most files are rejected, so the glob is consulted against borrowed paths and the
+            // project-relative string is only built for the ones that survive.
+            let Ok(relative) = entry.path().strip_prefix(self.project.root()) else {
+                continue;
+            };
+            if !matcher.is_match(entry.file_name()) && !matcher.is_match(relative) {
+                continue;
+            }
+
+            found.push(crate::project::normalize_separators(relative));
+            if found.len() >= limit {
+                break;
             }
         }
 
@@ -163,7 +169,7 @@ impl FileTools {
         let targets: Vec<_> = if base.is_file() {
             vec![base.clone()]
         } else {
-            self.walk_builder(&base)
+            self.walk_builder(&base)?
                 .build()
                 .filter_map(Result::ok)
                 .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
@@ -172,18 +178,21 @@ impl FileTools {
         };
 
         for path in targets {
-            let relative = self.project.relativize(&path)?;
-
+            // Ordered cheapest first: the extension test rejects most of a Roblox project by
+            // reading a few bytes of the path, so it runs before anything that allocates.
             if request.restrict_to_code_files && !is_code_file(&path) {
                 continue;
             }
+            let Ok(borrowed) = path.strip_prefix(self.project.root()) else {
+                continue;
+            };
             if let Some(matcher) = &include
-                && !matcher.is_match(&relative)
+                && !matcher.is_match(borrowed)
             {
                 continue;
             }
             if let Some(matcher) = &exclude
-                && matcher.is_match(&relative)
+                && matcher.is_match(borrowed)
             {
                 continue;
             }
@@ -191,19 +200,25 @@ impl FileTools {
             let Ok(contents) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let lines: Vec<&str> = contents.lines().collect();
-            let line_starts = line_offsets(&contents);
+
+            // Most files hold no match at all, so the line structures the snippets need are built
+            // on the first hit rather than for every file that was merely read.
+            let mut index: Option<LineIndex> = None;
+            let mut relative: Option<String> = None;
 
             for found in regex.find_iter(&contents) {
                 if total >= request.max_matches {
                     result.truncated = true;
                     break;
                 }
-                let start_line = line_index_for(&line_starts, found.start());
-                let end_line = line_index_for(&line_starts, found.end().saturating_sub(1));
+                let index = index.get_or_insert_with(|| LineIndex::new(&contents));
+                let relative =
+                    relative.get_or_insert_with(|| crate::project::normalize_separators(borrowed));
+
+                let start_line = index.line_of(found.start());
+                let end_line = index.line_of(found.end().saturating_sub(1));
                 let from = start_line.saturating_sub(request.context_lines_before);
-                let to =
-                    (end_line + request.context_lines_after).min(lines.len().saturating_sub(1));
+                let to = end_line + request.context_lines_after;
 
                 result
                     .matches
@@ -211,8 +226,8 @@ impl FileTools {
                     .or_default()
                     .push(PatternMatch {
                         start_line: from + 1,
-                        end_line: to + 1,
-                        snippet: lines[from..=to].join("\n"),
+                        end_line: index.clamp_line(to) + 1,
+                        snippet: index.text(from, to).into_owned(),
                     });
                 total += 1;
             }
@@ -235,25 +250,20 @@ impl FileTools {
         Ok(relative)
     }
 
-    fn walk_builder(&self, base: &Path) -> WalkBuilder {
-        let mut builder = WalkBuilder::new(base);
-        builder
-            .hidden(false)
-            .git_ignore(self.settings.project.respect_gitignore)
-            .git_global(false)
-            .git_exclude(self.settings.project.respect_gitignore)
-            .follow_links(false)
-            .require_git(false);
-
-        for pattern in &self.settings.project.ignored_paths {
-            builder.add_ignore(pattern);
-        }
-        builder.filter_entry(|entry| {
-            entry.file_name() != std::ffi::OsStr::new(".git")
-                && entry.file_name() != std::ffi::OsStr::new(crate::project::BISKIT_DIR)
-        });
-        builder
+    fn walk_builder(&self, base: &Path) -> Result<WalkBuilder> {
+        crate::project::walk_builder(base, &self.settings.project)
     }
+}
+
+/// Trims a sorted listing to `limit` entries in total, directories first, and reports whether
+/// anything was dropped.
+fn truncate_listing(directories: &mut Vec<String>, files: &mut Vec<String>, limit: usize) -> bool {
+    if directories.len() + files.len() <= limit {
+        return false;
+    }
+    directories.truncate(limit);
+    files.truncate(limit - directories.len());
+    true
 }
 
 fn relativize_to(path: &Path, base: &Path) -> Result<String> {
@@ -294,28 +304,15 @@ fn is_code_file(path: &Path) -> bool {
         .is_some_and(|extension| LUAU_EXTENSIONS.contains(&extension))
 }
 
-fn line_offsets(contents: &str) -> Vec<usize> {
-    let mut offsets = vec![0usize];
-    for (index, byte) in contents.bytes().enumerate() {
-        if byte == b'\n' {
-            offsets.push(index + 1);
-        }
-    }
-    offsets
-}
-
-fn line_index_for(line_starts: &[usize], offset: usize) -> usize {
-    match line_starts.binary_search(&offset) {
-        Ok(index) => index,
-        Err(index) => index.saturating_sub(1),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn open() -> (tempfile::TempDir, FileTools) {
+        open_with(Settings::default())
+    }
+
+    fn open_with(settings: Settings) -> (tempfile::TempDir, FileTools) {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("src").join("Services");
         std::fs::create_dir_all(&nested).unwrap();
@@ -323,7 +320,20 @@ mod tests {
         std::fs::write(dir.path().join("src").join("init.luau"), "return {}\n").unwrap();
 
         let project = Project::open(dir.path()).unwrap();
-        (dir, FileTools::new(project, Settings::default()))
+        (dir, FileTools::new(project, settings))
+    }
+
+    fn search(pattern: &str) -> PatternSearchRequest<'_> {
+        PatternSearchRequest {
+            pattern,
+            relative_path: ".",
+            context_lines_before: 0,
+            context_lines_after: 0,
+            paths_include_glob: None,
+            paths_exclude_glob: None,
+            restrict_to_code_files: false,
+            max_matches: 200,
+        }
     }
 
     #[test]
@@ -349,5 +359,204 @@ mod tests {
 
         assert_eq!(listing.base, ".");
         assert_eq!(listing.directories, vec!["src".to_string()]);
+    }
+
+    #[test]
+    fn a_truncated_listing_is_the_first_entries_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        // Written in an order that is not the sorted order, so a walk-order truncation would
+        // return a different set from a sorted one.
+        for index in [7usize, 3, 9, 1, 5, 0, 8, 2, 6, 4] {
+            std::fs::write(
+                dir.path().join(format!("Module{index}.luau")),
+                "return {}\n",
+            )
+            .unwrap();
+        }
+
+        let mut settings = Settings::default();
+        settings.tools.max_listing_entries = 4;
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), settings);
+
+        let listing = files.list_dir(".", false).unwrap();
+        assert!(listing.truncated);
+        assert_eq!(
+            listing.files,
+            vec![
+                "Module0.luau".to_string(),
+                "Module1.luau".to_string(),
+                "Module2.luau".to_string(),
+                "Module3.luau".to_string(),
+            ]
+        );
+        assert_eq!(listing.files, files.list_dir(".", false).unwrap().files);
+    }
+
+    #[test]
+    fn a_listing_that_fits_is_not_marked_truncated() {
+        let (_dir, files) = open();
+        let listing = files.list_dir("src", true).unwrap();
+        assert!(!listing.truncated);
+        assert_eq!(listing.files.len(), 2);
+    }
+
+    #[test]
+    fn ignored_paths_are_excluded_from_every_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("Packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(packages.join("Vendored.luau"), "local Marker = 1\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src").join("Own.luau"),
+            "local Marker = 1\n",
+        )
+        .unwrap();
+
+        let mut settings = Settings::default();
+        settings.project.ignored_paths = vec!["Packages/".to_string()];
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), settings);
+
+        assert_eq!(
+            files.find_file("*.luau", ".").unwrap(),
+            vec!["src/Own.luau".to_string()]
+        );
+        assert_eq!(
+            files.list_dir(".", true).unwrap().directories,
+            vec!["src".to_string()]
+        );
+
+        let found = files.search_for_pattern(search("Marker")).unwrap();
+        assert_eq!(
+            found.matches.keys().collect::<Vec<_>>(),
+            vec!["src/Own.luau"]
+        );
+    }
+
+    #[test]
+    fn an_unignored_project_still_sees_everything() {
+        let (_dir, files) = open_with(Settings::default());
+        assert_eq!(files.find_file("*.luau", ".").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_invalid_ignored_path_is_reported_rather_than_dropped() {
+        let mut settings = Settings::default();
+        settings.project.ignored_paths = vec!["[".to_string()];
+        let (_dir, files) = open_with(settings);
+
+        let error = files.list_dir(".", false).unwrap_err().to_string();
+        assert!(error.contains("ignored_paths"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn a_match_reports_the_lines_its_context_window_reaches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Module.luau"),
+            "local a = 1\nlocal Target = 2\nlocal c = 3\nlocal d = 4\n",
+        )
+        .unwrap();
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), Settings::default());
+
+        let mut request = search("Target");
+        request.context_lines_before = 1;
+        request.context_lines_after = 1;
+        let found = files.search_for_pattern(request).unwrap();
+
+        let hit = &found.matches["Module.luau"][0];
+        assert_eq!((hit.start_line, hit.end_line), (1, 3));
+        assert_eq!(hit.snippet, "local a = 1\nlocal Target = 2\nlocal c = 3");
+        assert!(!found.truncated);
+    }
+
+    #[test]
+    fn context_windows_are_clamped_to_the_ends_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Module.luau"), "only Target here\n").unwrap();
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), Settings::default());
+
+        let mut request = search("Target");
+        request.context_lines_before = 5;
+        request.context_lines_after = 5;
+        let found = files.search_for_pattern(request).unwrap();
+
+        let hit = &found.matches["Module.luau"][0];
+        assert_eq!((hit.start_line, hit.end_line), (1, 1));
+        assert_eq!(hit.snippet, "only Target here");
+    }
+
+    #[test]
+    fn crlf_files_do_not_leak_carriage_returns_into_snippets() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Module.luau"),
+            "local a = 1\r\nlocal Target = 2\r\nlocal c = 3\r\n",
+        )
+        .unwrap();
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), Settings::default());
+
+        let mut request = search("Target");
+        request.context_lines_before = 1;
+        request.context_lines_after = 1;
+        let found = files.search_for_pattern(request).unwrap();
+
+        let hit = &found.matches["Module.luau"][0];
+        assert_eq!(hit.snippet, "local a = 1\nlocal Target = 2\nlocal c = 3");
+    }
+
+    #[test]
+    fn the_match_cap_sets_the_truncation_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Module.luau"), "Target\n".repeat(10)).unwrap();
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), Settings::default());
+
+        let mut request = search("Target");
+        request.max_matches = 4;
+        let found = files.search_for_pattern(request).unwrap();
+
+        assert!(found.truncated);
+        assert_eq!(found.matches["Module.luau"].len(), 4);
+    }
+
+    #[test]
+    fn a_search_that_matches_nothing_reports_nothing() {
+        let (_dir, files) = open();
+        let found = files
+            .search_for_pattern(search("NotPresentAnywhere"))
+            .unwrap();
+        assert!(found.matches.is_empty());
+        assert!(!found.truncated);
+    }
+
+    #[test]
+    fn globs_and_the_code_filter_narrow_the_file_set() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("Kept.luau"), "Target\n").unwrap();
+        std::fs::write(dir.path().join("src").join("Skipped.luau"), "Target\n").unwrap();
+        std::fs::write(dir.path().join("notes.md"), "Target\n").unwrap();
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), Settings::default());
+
+        let matched = |request: PatternSearchRequest<'_>| -> Vec<String> {
+            files
+                .search_for_pattern(request)
+                .unwrap()
+                .matches
+                .into_keys()
+                .collect()
+        };
+
+        let mut restricted = search("Target");
+        restricted.restrict_to_code_files = true;
+        assert_eq!(matched(restricted), ["src/Kept.luau", "src/Skipped.luau"]);
+
+        let mut excluded = search("Target");
+        excluded.paths_exclude_glob = Some("**/Skipped.luau");
+        assert_eq!(matched(excluded), ["notes.md", "src/Kept.luau"]);
+
+        let mut included = search("Target");
+        included.paths_include_glob = Some("src/**");
+        assert_eq!(matched(included), ["src/Kept.luau", "src/Skipped.luau"]);
     }
 }
