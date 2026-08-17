@@ -239,6 +239,10 @@ that defines forty matches spells its path once rather than forty times. `find_d
 with the same file-keyed shape. `get_symbols_overview` answers with a bare list, since the caller
 supplied the file.
 
+A symbol at the top of a result carries its full name path. A symbol nested under `children` carries
+only its own leaf name, because the chain of parents above it already spells the ancestry out. Join
+them with `/` to address one: `update` under `PlayerService` is `PlayerService/update`.
+
 ### Memories
 
 Memories are plain markdown under `.biskit/memories/`, nestable to any depth. Reference one from

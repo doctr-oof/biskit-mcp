@@ -50,6 +50,8 @@ When file has two symbols of same name, `get_symbols_overview` labels them `User
 
 `symbols` is keyed by file path, and each symbol under it carries no path of its own — path comes from key it sits under. `find_declaration` returns same file-keyed shape. `get_symbols_overview` returns bare list, since you supplied file yourself.
 
+Top-level symbol in result carries full name path. Nested symbol under `children` carries only own leaf name, because ancestry already spelled by chain it sits under. Join with `/` to address it: child `update` under `PlayerService` is `PlayerService/update`.
+
 ## After you edit code
 
 Biskit read source from disk each request, so edits visible immediately. After non-trivial edit, call `get_file_diagnostics` on changed file. If edit changed symbol signature or behavior, call `get_symbol_diagnostics` with `check_symbol_references: true` to catch breakage at call sites.

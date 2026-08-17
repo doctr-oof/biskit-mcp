@@ -481,19 +481,43 @@ fn collect_matches(
     }
 }
 
+/// Renders a symbol that sits at the top of a result, named by its full name path.
 fn render(node: &SymbolNode, content: &str, depth: u32, include_body: bool) -> SymbolMatch {
+    render_node(node, content, depth, include_body, true)
+}
+
+/// Renders a nested symbol, named by its own leaf segment. The ancestry is already spelled out by
+/// the chain of parents it sits under, so repeating it would cost the caller the prefix on every
+/// child. Join a child's name to its parent's name path with `/` to address it.
+fn render_child(node: &SymbolNode, content: &str, depth: u32) -> SymbolMatch {
+    render_node(node, content, depth, false, false)
+}
+
+fn render_node(
+    node: &SymbolNode,
+    content: &str,
+    depth: u32,
+    include_body: bool,
+    full_name_path: bool,
+) -> SymbolMatch {
     let children = if depth == 0 {
         Vec::new()
     } else {
         node.children
             .iter()
             .filter(|child| !is_low_level_kind(child.kind))
-            .map(|child| render(child, content, depth - 1, false))
+            .map(|child| render_child(child, content, depth - 1))
             .collect()
     };
 
+    let name = if full_name_path {
+        node.name_path.clone()
+    } else {
+        node.name.clone()
+    };
+
     SymbolMatch {
-        name_path: Some(node.name_path.clone()),
+        name_path: Some(name),
         kind: node.kind_label().to_string(),
         start_line: node.range.start.line + 1,
         end_line: node.range.end.line + 1,
