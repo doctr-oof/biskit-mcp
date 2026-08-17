@@ -31,6 +31,12 @@ pub struct EditOutcome {
     pub replacements: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateOutcome {
+    pub memory: String,
+    pub replaced: bool,
+}
+
 impl MemoryStore {
     pub fn new(project: Project) -> Self {
         Self { project }
@@ -56,15 +62,26 @@ impl MemoryStore {
             .with_context(|| format!("failed to read memory: {}", canonical_name(name)))
     }
 
-    pub fn create(&self, name: &str, content: &str) -> Result<String> {
+    pub fn create(&self, name: &str, content: &str, overwrite: bool) -> Result<CreateOutcome> {
         let path = self.path_for(name)?;
+        let replaced = path.is_file();
+        if replaced && !overwrite {
+            bail!(
+                "memory already exists: {}; amend it with edit_memory, or pass overwrite to \
+                 replace it wholesale",
+                canonical_name(name)
+            );
+        }
         self.project.bootstrap()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&path, content)
             .with_context(|| format!("failed to write memory: {}", canonical_name(name)))?;
-        Ok(canonical_name(name))
+        Ok(CreateOutcome {
+            memory: canonical_name(name),
+            replaced,
+        })
     }
 
     pub fn delete(&self, name: &str) -> Result<String> {
@@ -260,7 +277,7 @@ mod tests {
         let store = MemoryStore::new(project.clone());
 
         store
-            .create("architecture/rendering", "# Rendering")
+            .create("architecture/rendering", "# Rendering", false)
             .unwrap();
 
         assert!(project.biskit_dir().join(".gitignore").is_file());
@@ -272,9 +289,9 @@ mod tests {
     fn creates_and_lists_nested_memories() {
         let (_guard, store) = store();
         store
-            .create("architecture/rendering", "# Rendering")
+            .create("architecture/rendering", "# Rendering", false)
             .unwrap();
-        store.create("style-guide.md", "# Style").unwrap();
+        store.create("style-guide.md", "# Style", false).unwrap();
 
         assert_eq!(
             store.list().unwrap(),
@@ -289,11 +306,12 @@ mod tests {
     #[test]
     fn rename_updates_mem_references() {
         let (_guard, store) = store();
-        store.create("old-name", "# Old").unwrap();
+        store.create("old-name", "# Old", false).unwrap();
         store
             .create(
                 "index",
                 "See mem:old-name and mem:old-name.md plus mem:other",
+                false,
             )
             .unwrap();
 
@@ -309,7 +327,7 @@ mod tests {
     #[test]
     fn edit_rejects_ambiguous_pattern() {
         let (_guard, store) = store();
-        store.create("notes", "alpha\nalpha\n").unwrap();
+        store.create("notes", "alpha\nalpha\n", false).unwrap();
         assert!(store.edit("notes", "alpha", "beta", false).is_err());
 
         let outcome = store.edit("notes", "alpha", "beta", true).unwrap();
@@ -320,14 +338,28 @@ mod tests {
     #[test]
     fn rejects_path_traversal() {
         let (_guard, store) = store();
-        assert!(store.create("../escape", "nope").is_err());
+        assert!(store.create("../escape", "nope", false).is_err());
     }
 
     #[test]
     fn delete_prunes_empty_directories() {
         let (_guard, store) = store();
-        store.create("nested/deep/leaf", "x").unwrap();
+        store.create("nested/deep/leaf", "x", false).unwrap();
         store.delete("nested/deep/leaf").unwrap();
         assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_refuses_to_clobber_without_overwrite() {
+        let (_guard, store) = store();
+        let first = store.create("notes", "original", false).unwrap();
+        assert!(!first.replaced);
+
+        assert!(store.create("notes", "replacement", false).is_err());
+        assert_eq!(store.read("notes").unwrap(), "original");
+
+        let second = store.create("notes", "replacement", true).unwrap();
+        assert!(second.replaced);
+        assert_eq!(store.read("notes").unwrap(), "replacement");
     }
 }

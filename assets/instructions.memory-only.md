@@ -50,4 +50,5 @@ Give memories meaningful names. Nest with `/` when topic has several parts, exam
 `` `mem:Combat/HitDetection` ``. `rename_memory` rewrites those pointers automatically.
 
 Use `edit_memory` to amend existing memory, not wholesale rewrite with `create_memory`. Wholesale
-rewrites lose detail that was there for reason.
+rewrites lose detail that was there for reason. `create_memory` errors when name already taken;
+pass `overwrite: true` only when replacing content deliberately.

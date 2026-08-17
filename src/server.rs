@@ -56,6 +56,9 @@ pub struct CreateMemoryRequest {
     pub memory_name: String,
     /// Markdown body. Reference other memories with `mem:name` in backticks.
     pub content: String,
+    /// Replace a memory that already exists. Prefer edit_memory over a wholesale rewrite.
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -126,7 +129,8 @@ pub struct SymbolsOverviewRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FindSymbolRequestInput {
-    /// Name path such as "update", "PlayerService/update", or "/PlayerService".
+    /// Name path such as "update", "PlayerService/update", "PlayerService:update", or
+    /// "/PlayerService". Append "[n]" to a segment to pick one of several same-named symbols.
     pub name_path: String,
     /// File or directory to search. Omit to search the whole project.
     #[serde(default)]
@@ -153,10 +157,21 @@ pub struct FindSymbolRequestInput {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SymbolLocationRequest {
-    /// Name path of the symbol.
+    /// Name path of the symbol. Append "[n]" to a segment to pick one of several same-named symbols.
     pub name_path: String,
     /// File containing the symbol, relative to the project root.
     pub relative_path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FindDeclarationRequest {
+    /// Name path of the symbol. Append "[n]" to a segment to pick one of several same-named symbols.
+    pub name_path: String,
+    /// File containing the symbol, relative to the project root.
+    pub relative_path: String,
+    /// Include a source snippet around each result.
+    #[serde(default)]
+    pub include_body: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -289,18 +304,23 @@ impl Biskit {
     }
 
     #[tool(
-        description = "Writes a memory recording durable knowledge about this project, in markdown. Use a meaningful, nestable name."
+        description = "Writes a memory recording durable knowledge about this project, in markdown. Use a meaningful, nestable name. Errors if the name is taken unless overwrite is set."
     )]
     async fn create_memory(
         &self,
         Parameters(request): Parameters<CreateMemoryRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let name = self
+        let outcome = self
             .inner
             .memories
-            .create(&request.memory_name, &request.content)
+            .create(&request.memory_name, &request.content, request.overwrite)
             .map_err(fail)?;
-        text(format!("Wrote memory {name}."))
+        let verb = if outcome.replaced {
+            "Replaced"
+        } else {
+            "Wrote"
+        };
+        text(format!("{verb} memory {}.", outcome.memory))
     }
 
     #[tool(description = "Deletes a memory.")]
@@ -448,11 +468,15 @@ impl Biskit {
     #[tool(description = "Finds where a symbol is declared.")]
     async fn find_declaration(
         &self,
-        Parameters(request): Parameters<SymbolLocationRequest>,
+        Parameters(request): Parameters<FindDeclarationRequest>,
     ) -> Result<CallToolResult, McpError> {
         let query = SymbolQuery::new(&self.inner.language_server);
         ok(&query
-            .find_declaration(&request.name_path, &request.relative_path)
+            .find_declaration(
+                &request.name_path,
+                &request.relative_path,
+                request.include_body,
+            )
             .await
             .map_err(fail)?)
     }

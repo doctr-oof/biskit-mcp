@@ -32,14 +32,21 @@ Prefer symbolic tools over whole files. Reading 900-line module for one function
 
 ## Name paths
 
-Symbols addressed by name path: `/`-separated chain of enclosing symbol names.
+Symbols addressed by name path: separated chain of enclosing symbol names. `/`, `.`, and `:` all work as separator, so write name the way it appear in source.
 
 - `update` matches any symbol named `update` at any depth.
 - `PlayerService/update` matches `update` nested directly inside `PlayerService`.
+- `PlayerService.update` and `PlayerService:update` same thing.
 - `/PlayerService` matches only top-level `PlayerService`, not nested one.
 - `/PlayerService/update` fully absolute.
 
+Method declared `function PlayerUtils:GetPlayerMaid()` addressable as `GetPlayerMaid`, `PlayerUtils:GetPlayerMaid`, or `PlayerUtils/GetPlayerMaid`. Owner name not required.
+
 Set `substring_matching: true` to match final segment loosely when you know only part of name.
+
+When file has two symbols of same name, `get_symbols_overview` labels them `UserInfo[0]` and `UserInfo[1]`. Pass label back verbatim to address exactly one. Bare `UserInfo` matches both. Tools taking single symbol (`find_declaration`, `find_referencing_symbols`, `get_symbol_diagnostics`) error on ambiguous name — use indexed form there.
+
+`find_symbol` returns `{ symbols, truncated }`. `truncated: true` means `max_matches` cut result short: narrow with `relative_path` or raise cap.
 
 ## After you edit code
 
@@ -53,11 +60,13 @@ Do not write memory for: file contents (read it instead), transient task state, 
 
 Give memories meaningful names. Nest with `/` when topic has several parts, example `Combat/HitDetection`. Cross-reference other memories with `mem:` pointer in backticks, such as `` `mem:Combat/HitDetection` ``. `rename_memory` rewrites those pointers automatically.
 
-Use `edit_memory` to amend existing memory, not wholesale rewrite with `create_memory`. Wholesale rewrites lose detail that was there for reason.
+Use `edit_memory` to amend existing memory, not wholesale rewrite with `create_memory`. Wholesale rewrites lose detail that was there for reason. `create_memory` errors when name already taken; pass `overwrite: true` only when replacing content deliberately.
 
 ## Diagnostics severity
 
 `min_severity` filters results: `1` errors only, `2` errors and warnings, `3` adds information, `4` adds hints. Default `2`. Ask `1` when you care only whether something broken.
+
+Diagnostics grouped file, then severity, then `symbols` keyed by name path. Diagnostics belonging to no symbol land in `unscoped` list beside it.
 
 ## When the language server misbehaves
 

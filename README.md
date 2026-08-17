@@ -178,7 +178,7 @@ Memory:
 |---|---|
 | `list_memories` | Names of every stored memory |
 | `read_memory` | Read one memory |
-| `create_memory` | Write a new memory |
+| `create_memory` | Write a new memory, refusing an existing name unless `overwrite` is set |
 | `edit_memory` | Regex replace inside a memory |
 | `rename_memory` | Rename or move, rewriting `mem:` references |
 | `delete_memory` | Delete a memory |
@@ -210,18 +210,29 @@ Use `find_referencing_symbols` instead.
 
 ### Name paths
 
-Symbols are addressed by name path. Dots and slashes are interchangeable, so an agent does not have
-to guess:
+Symbols are addressed by name path. Slashes, dots, and colons are interchangeable, so an agent does
+not have to guess:
 
 | Pattern | Matches |
 |---|---|
 | `update` | any symbol named `update`, at any depth |
 | `PlayerService/update` | `update` directly inside `PlayerService` |
 | `PlayerService.update` | the same thing |
+| `PlayerService:update` | the same thing |
 | `/PlayerService` | only a top-level `PlayerService` |
+| `UserInfo[1]` | the second of two same-named `UserInfo` symbols |
 
-luau-lsp reports members as flat dotted names such as `PlayerService.addScore`. Biskit splits those
-into name path segments, so nesting works the way an agent expects.
+luau-lsp reports members as flat names, dot-separated for fields such as `PlayerService.addScore`
+and colon-separated for methods such as `PlayerService:addScore`. Biskit splits both into name path
+segments, so a method is reachable by its own name without naming the table that owns it, and LSP
+requests anchor on the method rather than on that table.
+
+Symbols that share a name within one file are listed as `UserInfo[0]` and `UserInfo[1]`. Those
+labels can be passed straight back in, which is the only way to address one of them with
+`find_declaration`, `find_referencing_symbols`, or `get_symbol_diagnostics`.
+
+`find_symbol` answers with `{ symbols, truncated }`, where `truncated` reports whether `max_matches`
+cut the result set short.
 
 ### Memories
 
