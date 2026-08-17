@@ -1,20 +1,26 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 
+use super::client;
 use super::name_path::NamePathPattern;
 use super::protocol::{Diagnostic, Location, Position, Severity, is_low_level_kind};
 use super::session::{LanguageServerHandle, Session, ensure_luau_file};
 use super::symbols::SymbolNode;
 use super::uri;
 use crate::bail_hint;
+use crate::lines::LineIndex;
 use crate::project::Project;
 
 const NAME_PATH_HINT: &str = "a name path is a symbol name such as \"update\", optionally \
                               qualified with its owners as \"PlayerService:update\"; prefix \"/\" \
                               to anchor it to the top level of the file";
+
+const SCAN_ABORTED: &str = "the project scan stopped early because the language server stopped \
+                            answering; restart it with restart_language_server";
 
 /// Lines either side of a declaration reported with `include_body`. A declaration whose own symbol
 /// could not be resolved has only its line to show, so one line of context earns its place there.
@@ -125,7 +131,7 @@ impl<'a> SymbolQuery<'a> {
 
     async fn candidate_files(&self, relative_path: Option<&str>) -> Result<Vec<PathBuf>> {
         let Some(relative) = relative_path else {
-            return self.handle.resolve_luau_files().await;
+            return self.handle.resolve_luau_files(None).await;
         };
 
         let resolved = self.project().resolve(relative)?;
@@ -141,11 +147,8 @@ impl<'a> SymbolQuery<'a> {
             );
         }
 
-        let all = self.handle.resolve_luau_files().await?;
-        Ok(all
-            .into_iter()
-            .filter(|path| path.starts_with(&resolved))
-            .collect())
+        // Walking the named subtree rather than walking the project and filtering afterwards.
+        self.handle.resolve_luau_files(Some(&resolved)).await
     }
 
     pub async fn find_symbol(&self, request: FindSymbolRequest) -> Result<SymbolSearchResult> {
@@ -158,6 +161,8 @@ impl<'a> SymbolQuery<'a> {
         let files = self
             .candidate_files(request.relative_path.as_deref())
             .await?;
+        let files = prefilter_by_literal(files, pattern.literal_filter()).await?;
+
         // Collecting one past the cap is what makes a complete result set distinguishable
         // from a truncated one.
         let probe = request.max_matches.saturating_add(1);
@@ -167,11 +172,18 @@ impl<'a> SymbolQuery<'a> {
             if matches.len() >= probe {
                 break;
             }
-            let Ok(symbols) = session.document_symbols(&path).await else {
-                continue;
+            let (symbols, content) = match session.document_symbols(&path).await {
+                Ok(found) => found,
+                // One file failing to parse is worth stepping over. A server that has stopped
+                // answering is not: every remaining file would burn a full request timeout,
+                // turning a thirty second failure into an hours long one.
+                Err(error) if client::is_unavailable(&error) => {
+                    return Err(error).context(SCAN_ABORTED);
+                }
+                Err(_) => continue,
             };
-            let content = session.ensure_open(&path).await?;
             let relative = self.project().relativize(&path)?;
+            let lines = LineIndex::new(&content);
 
             let mut found = Vec::new();
             collect_matches(
@@ -179,7 +191,7 @@ impl<'a> SymbolQuery<'a> {
                 &pattern,
                 &request,
                 probe - matches.len(),
-                &content,
+                &lines,
                 &mut found,
             );
             matches.extend(found.into_iter().map(|symbol| (relative.clone(), symbol)));
@@ -203,8 +215,8 @@ impl<'a> SymbolQuery<'a> {
         ensure_luau_file(&path)?;
 
         let session = self.handle.session().await?;
-        let symbols = session.document_symbols(&path).await?;
-        let content = session.ensure_open(&path).await?;
+        let (symbols, content) = session.document_symbols(&path).await?;
+        let lines = LineIndex::new(&content);
 
         let options = RenderOptions {
             depth,
@@ -216,7 +228,7 @@ impl<'a> SymbolQuery<'a> {
         // only top-level symbols are variables would otherwise look like an empty file.
         Ok(symbols
             .iter()
-            .map(|symbol| render(symbol, &content, options))
+            .map(|symbol| render(symbol, &lines, options))
             .collect())
     }
 
@@ -231,13 +243,12 @@ impl<'a> SymbolQuery<'a> {
         ensure_luau_file(&path)?;
 
         let pattern = NamePathPattern::parse(name_path, false);
-        let symbols = session.document_symbols(&path).await?;
-        let content = session.ensure_open(&path).await?;
+        let (symbols, content) = session.document_symbols(&path).await?;
 
         let mut found = Vec::new();
         for root in &symbols {
             root.walk(&mut |node| {
-                if pattern.matches(&node.ancestors()) {
+                if pattern.matches(&node.name_path) {
                     found.push(node.clone());
                 }
             });
@@ -285,7 +296,7 @@ impl<'a> SymbolQuery<'a> {
         // A local declared in place has nothing further to point at, so the server answers with
         // nothing. The symbol itself is the correct answer there.
         if locations.is_empty() {
-            let content = session.ensure_open(&path).await?;
+            let content = session.ensure_open(&path).await?.content;
             let relative = self.project().relativize(&path)?;
             let options = RenderOptions {
                 depth: 0,
@@ -294,7 +305,7 @@ impl<'a> SymbolQuery<'a> {
             };
             return Ok(SymbolsByFile::from([(
                 relative,
-                vec![render(&symbol, &content, options)],
+                vec![render(&symbol, &LineIndex::new(&content), options)],
             )]));
         }
 
@@ -318,39 +329,42 @@ impl<'a> SymbolQuery<'a> {
         let probe = max_results.saturating_add(1);
         let mut references: Vec<(String, ReferenceMatch)> = Vec::new();
 
-        for location in locations
+        let wanted: Vec<Location> = locations
             .into_iter()
             .filter(|location| !is_declaration_site(location, &path, position))
-        {
+            .collect();
+
+        // Forty references spread over five files are five files' worth of information. Reading
+        // and re-requesting the symbol tree once per reference asked the server for the same file
+        // as many times as it happened to appear.
+        'files: for (target, group) in group_locations_by_file(wanted) {
             if references.len() >= probe {
                 break;
             }
-            let Ok(target) = uri::to_path(&location.uri) else {
-                continue;
-            };
             let Ok(relative) = self.project().relativize(&target) else {
                 continue;
             };
-            let Ok(content) = session.ensure_open(&target).await else {
+            let Ok((symbols, content)) = session.document_symbols(&target).await else {
                 continue;
             };
-            let containing = session
-                .document_symbols(&target)
-                .await
-                .ok()
-                .and_then(|symbols| {
-                    SymbolNode::innermost_at(&symbols, location.range.start)
-                        .map(|node| node.name_path.clone())
-                });
+            let lines = LineIndex::new(&content);
 
-            references.push((
-                relative,
-                ReferenceMatch {
-                    line: location.range.start.line + 1,
-                    containing_symbol: containing,
-                    snippet: snippet_around(&content, location.range.start.line, context_lines),
-                },
-            ));
+            for location in group {
+                if references.len() >= probe {
+                    break 'files;
+                }
+                let containing = SymbolNode::innermost_at(&symbols, location.range.start)
+                    .map(|node| node.name_path.clone());
+
+                references.push((
+                    relative.clone(),
+                    ReferenceMatch {
+                        line: location.range.start.line + 1,
+                        containing_symbol: containing,
+                        snippet: snippet_around(&lines, location.range.start.line, context_lines),
+                    },
+                ));
+            }
         }
 
         let truncated = references.len() > max_results;
@@ -369,39 +383,41 @@ impl<'a> SymbolQuery<'a> {
         include_detail: bool,
     ) -> Result<SymbolsByFile> {
         let mut rendered = SymbolsByFile::new();
-        for location in locations {
-            let Ok(target) = uri::to_path(&location.uri) else {
-                continue;
-            };
+        for (target, group) in group_locations_by_file(locations) {
             let Ok(relative) = self.project().relativize(&target) else {
                 continue;
             };
-            let symbols = session.document_symbols(&target).await.unwrap_or_default();
-            let node = SymbolNode::innermost_at(&symbols, location.range.start);
-            let body = if include_body {
-                let content = session.ensure_open(&target).await?;
-                Some(snippet_around(
-                    &content,
-                    location.range.start.line,
-                    DECLARATION_CONTEXT_LINES,
-                ))
-            } else {
-                None
-            };
+            let (symbols, content) = session
+                .document_symbols(&target)
+                .await
+                .unwrap_or_else(|_| (Vec::new(), Arc::from("")));
+            let lines = LineIndex::new(&content);
 
-            rendered.entry(relative).or_default().push(SymbolMatch {
-                name_path: node.map(|found| found.name_path.clone()),
-                kind: node
-                    .map(|found| found.kind_label().to_string())
-                    .unwrap_or_else(|| "Unknown".to_string()),
-                start_line: location.range.start.line + 1,
-                end_line: location.range.end.line + 1,
-                detail: include_detail
-                    .then(|| node.and_then(|found| found.detail.clone()))
-                    .flatten(),
-                body,
-                children: Vec::new(),
-            });
+            for location in group {
+                let node = SymbolNode::innermost_at(&symbols, location.range.start);
+                rendered
+                    .entry(relative.clone())
+                    .or_default()
+                    .push(SymbolMatch {
+                        name_path: node.map(|found| found.name_path.clone()),
+                        kind: node
+                            .map(|found| found.kind_label().to_string())
+                            .unwrap_or_else(|| "Unknown".to_string()),
+                        start_line: location.range.start.line + 1,
+                        end_line: location.range.end.line + 1,
+                        detail: include_detail
+                            .then(|| node.and_then(|found| found.detail.clone()))
+                            .flatten(),
+                        body: include_body.then(|| {
+                            snippet_around(
+                                &lines,
+                                location.range.start.line,
+                                DECLARATION_CONTEXT_LINES,
+                            )
+                        }),
+                        children: Vec::new(),
+                    });
+            }
         }
         Ok(rendered)
     }
@@ -418,7 +434,11 @@ impl<'a> SymbolQuery<'a> {
 
         let session = self.handle.session().await?;
         let diagnostics = session.diagnostics(&path).await?;
-        let symbols = session.document_symbols(&path).await.unwrap_or_default();
+        let symbols = session
+            .document_symbols(&path)
+            .await
+            .map(|(symbols, _)| symbols)
+            .unwrap_or_default();
         let relative = self.project().relativize(&path)?;
 
         let filtered = diagnostics.into_iter().filter(|diagnostic| {
@@ -517,12 +537,69 @@ fn group_by_file<T>(matches: Vec<(String, T)>) -> BTreeMap<String, Vec<T>> {
     grouped
 }
 
+/// Groups locations by the file they point into, keeping the order in which each file was first
+/// seen so a truncated result set is still the first N in the server's own ordering.
+fn group_locations_by_file(locations: Vec<Location>) -> Vec<(PathBuf, Vec<Location>)> {
+    let mut order: Vec<(PathBuf, Vec<Location>)> = Vec::new();
+    let mut seen: std::collections::HashMap<PathBuf, usize> = std::collections::HashMap::new();
+
+    for location in locations {
+        let Ok(target) = uri::to_path(&location.uri) else {
+            continue;
+        };
+        match seen.get(&target) {
+            Some(index) => order[*index].1.push(location),
+            None => {
+                seen.insert(target.clone(), order.len());
+                order.push((target, vec![location]));
+            }
+        }
+    }
+    order
+}
+
+/// Drops candidate files whose bytes never spell `needle`.
+///
+/// A symbol cannot be defined in a file that does not contain its name, and reading a file and
+/// searching it for a literal is orders of magnitude cheaper than a `documentSymbol` round trip
+/// through a single stdio pipe. For the common exploratory query, which matches nothing, this is
+/// the difference between one request per file in the project and none.
+///
+/// A file that cannot be read is kept, so the language server reports the problem rather than the
+/// file quietly vanishing from the result set. A single candidate is never filtered: a query
+/// naming one file should behave exactly as it did before.
+pub async fn prefilter_by_literal(
+    files: Vec<PathBuf>,
+    needle: Option<&str>,
+) -> Result<Vec<PathBuf>> {
+    let Some(needle) = needle.filter(|_| files.len() > 1) else {
+        return Ok(files);
+    };
+    let needle = needle.to_string();
+
+    let filtered = tokio::task::spawn_blocking(move || {
+        let finder = memchr::memmem::Finder::new(needle.as_bytes());
+        let mut kept = Vec::new();
+        for path in files {
+            match std::fs::read(&path) {
+                Ok(bytes) if finder.find(&bytes).is_none() => continue,
+                _ => kept.push(path),
+            }
+        }
+        kept
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("candidate pre-filter panicked: {error}"))?;
+
+    Ok(filtered)
+}
+
 fn collect_matches(
     nodes: &[SymbolNode],
     pattern: &NamePathPattern,
     request: &FindSymbolRequest,
     limit: usize,
-    content: &str,
+    lines: &LineIndex<'_>,
     out: &mut Vec<SymbolMatch>,
 ) {
     for node in nodes {
@@ -533,10 +610,10 @@ fn collect_matches(
             || request.include_kinds.contains(&node.kind))
             && !request.exclude_kinds.contains(&node.kind);
 
-        if kind_allowed && pattern.matches(&node.ancestors()) {
+        if kind_allowed && pattern.matches(&node.name_path) {
             out.push(render(
                 node,
-                content,
+                lines,
                 RenderOptions {
                     depth: request.depth,
                     include_body: request.include_body,
@@ -544,29 +621,29 @@ fn collect_matches(
                 },
             ));
         }
-        collect_matches(&node.children, pattern, request, limit, content, out);
+        collect_matches(&node.children, pattern, request, limit, lines, out);
     }
 }
 
 /// Renders a symbol that sits at the top of a result, named by its full name path.
-fn render(node: &SymbolNode, content: &str, options: RenderOptions) -> SymbolMatch {
-    render_node(node, content, options, true)
+fn render(node: &SymbolNode, lines: &LineIndex<'_>, options: RenderOptions) -> SymbolMatch {
+    render_node(node, lines, options, true)
 }
 
 /// Renders a nested symbol, named by its own leaf segment. The ancestry is already spelled out by
 /// the chain of parents it sits under, so repeating it would cost the caller the prefix on every
 /// child. Join a child's name to its parent's name path with `/` to address it.
-fn render_child(node: &SymbolNode, content: &str, options: RenderOptions) -> SymbolMatch {
+fn render_child(node: &SymbolNode, lines: &LineIndex<'_>, options: RenderOptions) -> SymbolMatch {
     let options = RenderOptions {
         include_body: false,
         ..options
     };
-    render_node(node, content, options, false)
+    render_node(node, lines, options, false)
 }
 
 fn render_node(
     node: &SymbolNode,
-    content: &str,
+    lines: &LineIndex<'_>,
     options: RenderOptions,
     full_name_path: bool,
 ) -> SymbolMatch {
@@ -580,7 +657,7 @@ fn render_node(
         node.children
             .iter()
             .filter(|child| !is_low_level_kind(child.kind))
-            .map(|child| render_child(child, content, nested))
+            .map(|child| render_child(child, lines, nested))
             .collect()
     };
 
@@ -599,34 +676,23 @@ fn render_node(
             .include_detail
             .then(|| node.detail.clone())
             .flatten(),
-        body: options.include_body.then(|| extract_body(content, node)),
+        body: options.include_body.then(|| extract_body(lines, node)),
         children,
     }
 }
 
-fn extract_body(content: &str, node: &SymbolNode) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.is_empty() {
-        return String::new();
-    }
-    let start = node.range.start.line as usize;
-    let end = (node.range.end.line as usize).min(lines.len().saturating_sub(1));
-    if start > end {
-        return String::new();
-    }
-    lines[start..=end].join("\n")
+fn extract_body(lines: &LineIndex<'_>, node: &SymbolNode) -> String {
+    lines
+        .text(node.range.start.line as usize, node.range.end.line as usize)
+        .into_owned()
 }
 
 /// The line at `line`, widened by `context` lines on each side.
-fn snippet_around(content: &str, line: u32, context: usize) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.is_empty() {
-        return String::new();
-    }
-    let index = (line as usize).min(lines.len().saturating_sub(1));
-    let start = index.saturating_sub(context);
-    let end = (index + context).min(lines.len().saturating_sub(1));
-    lines[start..=end].join("\n")
+fn snippet_around(lines: &LineIndex<'_>, line: u32, context: usize) -> String {
+    let index = lines.clamp_line(line as usize);
+    lines
+        .text(index.saturating_sub(context), index + context)
+        .into_owned()
 }
 
 fn group_diagnostics(
@@ -760,6 +826,137 @@ mod tests {
 
         assert_eq!(into["error"].symbols["Alpha"].len(), 2);
         assert_eq!(into["error"].unscoped.len(), 1);
+    }
+
+    fn at(path: &Path, line: u32) -> Location {
+        Location {
+            uri: uri::from_path(path).unwrap(),
+            range: Range {
+                start: position(line, 0),
+                end: position(line, 8),
+            },
+        }
+    }
+
+    #[test]
+    fn locations_group_by_file_in_first_seen_order() {
+        let root = PathBuf::from(if cfg!(windows) {
+            r"C:\project\src"
+        } else {
+            "/project/src"
+        });
+        let alpha = root.join("Alpha.luau");
+        let beta = root.join("Beta.luau");
+
+        let grouped = group_locations_by_file(vec![
+            at(&beta, 4),
+            at(&alpha, 1),
+            at(&beta, 9),
+            at(&alpha, 2),
+            at(&beta, 12),
+        ]);
+
+        assert_eq!(grouped.len(), 2, "each file appears once");
+        assert_eq!(grouped[0].0, beta, "first file seen stays first");
+        assert_eq!(
+            grouped[0]
+                .1
+                .iter()
+                .map(|l| l.range.start.line)
+                .collect::<Vec<_>>(),
+            vec![4, 9, 12],
+            "order within a file is preserved"
+        );
+        assert_eq!(grouped[1].0, alpha);
+        assert_eq!(
+            grouped[1]
+                .1
+                .iter()
+                .map(|l| l.range.start.line)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn locations_with_unreadable_uris_are_dropped_from_the_grouping() {
+        let path = PathBuf::from(if cfg!(windows) {
+            r"C:\project\src\Alpha.luau"
+        } else {
+            "/project/src/Alpha.luau"
+        });
+        let bad = Location {
+            uri: "https://example.com/Alpha.luau".to_string(),
+            range: range(3),
+        };
+
+        let grouped = group_locations_by_file(vec![bad, at(&path, 3)]);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].0, path);
+    }
+
+    #[test]
+    fn the_prefilter_keeps_only_files_that_spell_the_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mentions = dir.path().join("Mentions.luau");
+        let silent = dir.path().join("Silent.luau");
+        let missing = dir.path().join("Missing.luau");
+        std::fs::write(&mentions, "function Utils:GetPlayerMaid()\nend\n").unwrap();
+        std::fs::write(&silent, "local unrelated = 1\n").unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let files = vec![mentions.clone(), silent, missing.clone()];
+
+        let kept = runtime
+            .block_on(prefilter_by_literal(files.clone(), Some("GetPlayerMaid")))
+            .unwrap();
+        assert_eq!(
+            kept,
+            vec![mentions, missing],
+            "a file that cannot be read is kept so the server reports it"
+        );
+
+        // No usable literal, and a lone candidate, both leave the set untouched.
+        assert_eq!(
+            runtime
+                .block_on(prefilter_by_literal(files.clone(), None))
+                .unwrap(),
+            files
+        );
+        let single = vec![files[1].clone()];
+        assert_eq!(
+            runtime
+                .block_on(prefilter_by_literal(single.clone(), Some("GetPlayerMaid")))
+                .unwrap(),
+            single,
+            "a query naming one file behaves as it did before the filter existed"
+        );
+    }
+
+    #[test]
+    fn the_prefilter_survives_a_substring_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("Kept.luau");
+        let dropped = dir.path().join("Dropped.luau");
+        std::fs::write(&kept, "function Utils:GetPlayerMaid()\nend\n").unwrap();
+        std::fs::write(&dropped, "function Utils:Reset()\nend\n").unwrap();
+
+        let pattern = NamePathPattern::parse("PlayerMaid", true);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let survivors = runtime
+            .block_on(prefilter_by_literal(
+                vec![kept.clone(), dropped],
+                pattern.literal_filter(),
+            ))
+            .unwrap();
+        assert_eq!(survivors, vec![kept]);
     }
 
     #[test]

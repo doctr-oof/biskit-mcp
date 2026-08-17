@@ -1,6 +1,9 @@
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use ignore::WalkBuilder;
+use ignore::overrides::{Override, OverrideBuilder};
 
 use crate::bail_hint;
 
@@ -123,6 +126,62 @@ impl Project {
             .with_context(|| format!("path is outside the project: {}", absolute.display()))?;
         Ok(normalize_separators(stripped))
     }
+}
+
+/// The one walker every project traversal is built from.
+///
+/// Both the file tools and the Luau file scan need the same exclusions, and when they were
+/// configured separately they drifted: the scan descended into `.git`, which on a real repository
+/// is tens of thousands of stat calls that can never yield a `.luau` file.
+///
+/// `ignore` detects `.git` only so it can locate gitignore files; it never excludes the directory
+/// from traversal on its own, so the exclusion has to be stated here.
+pub fn walk_builder(base: &Path, settings: &crate::config::ProjectSettings) -> Result<WalkBuilder> {
+    let mut builder = WalkBuilder::new(base);
+    builder
+        .hidden(false)
+        .git_ignore(settings.respect_gitignore)
+        .git_exclude(settings.respect_gitignore)
+        .git_global(false)
+        .require_git(false)
+        .follow_links(false);
+
+    if !settings.ignored_paths.is_empty() {
+        builder.overrides(build_overrides(base, &settings.ignored_paths)?);
+    }
+
+    builder.filter_entry(|entry| {
+        let name = entry.file_name();
+        name != OsStr::new(".git") && name != OsStr::new(BISKIT_DIR)
+    });
+    Ok(builder)
+}
+
+/// Turns `project.ignored_paths` into exclusions.
+///
+/// `WalkBuilder::add_ignore` takes the path of an ignore *file*, not a pattern, so passing the
+/// patterns to it excluded nothing at all. An override glob prefixed with `!` is the API that
+/// carries gitignore syntax, which is what the setting has always been documented as taking.
+fn build_overrides(base: &Path, patterns: &[String]) -> Result<Override> {
+    let mut overrides = OverrideBuilder::new(base);
+    for pattern in patterns {
+        let negated = match pattern.strip_prefix('!') {
+            // A leading "!" in gitignore syntax re-includes, which for a list named
+            // "ignored_paths" would invert the caller's stated intent. Take it literally instead.
+            Some(rest) => rest,
+            None => pattern.as_str(),
+        };
+        overrides.add(&format!("!{negated}")).map_err(|error| {
+            crate::errors::hinted(
+                format!("invalid project.ignored_paths entry {pattern:?}: {error}"),
+                "entries use gitignore syntax, one pattern per entry, for example \"Packages/\" \
+                 or \"**/node_modules\"",
+            )
+        })?;
+    }
+    overrides
+        .build()
+        .context("failed to compile project.ignored_paths")
 }
 
 /// `std::fs::canonicalize` yields Windows verbatim paths, which many tools mishandle.

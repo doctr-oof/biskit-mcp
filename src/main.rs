@@ -1,15 +1,3 @@
-mod config;
-mod errors;
-mod files;
-mod json;
-mod lsp;
-mod memory;
-mod project;
-mod prompts;
-mod server;
-mod setup;
-mod upgrade;
-
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -18,11 +6,12 @@ use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::Settings;
-use crate::memory::MemoryStore;
-use crate::project::Project;
-use crate::server::Biskit;
-use crate::setup::{Client, HooksTarget};
+use biskit_mcp::config::Settings;
+use biskit_mcp::memory::MemoryStore;
+use biskit_mcp::project::Project;
+use biskit_mcp::server::Biskit;
+use biskit_mcp::setup::{Client, HooksTarget};
+use biskit_mcp::{lsp, project, prompts, setup, upgrade};
 
 const PROJECT_ENV: &str = "BISKIT_PROJECT";
 
@@ -252,6 +241,7 @@ fn run_server(request: RootRequest) -> Result<()> {
 
     runtime.block_on(async move {
         let biskit = Biskit::new(project, settings);
+        biskit.warm_up();
         let service = biskit.clone().serve(stdio()).await?;
         let outcome = service.waiting().await;
         biskit.shutdown().await;

@@ -221,7 +221,7 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `lsp.roblox_security_level` | `PluginSecurity` | Which Roblox API dump to load |
 | `lsp.sourcemap` | `sourcemap.json` | Rojo sourcemap path, or null to disable |
 | `lsp.server_settings` | empty | Raw luau-lsp settings in VS Code dotted-key form |
-| `project.ignored_paths` | empty | Extra gitignore-style exclusions |
+| `project.ignored_paths` | empty | Extra gitignore-style exclusions, applied to every project walk |
 | `project.memory_only` | `false` | Run without the language server, see below |
 | `tools.excluded` | empty | Tool names to hide from the agent |
 | `tools.max_answer_chars` | `150000` | Ceiling on one tool result, 0 to lift it |
