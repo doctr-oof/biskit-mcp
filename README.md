@@ -248,8 +248,11 @@ A symbol at the top of a result carries its full name path. A symbol nested unde
 only its own leaf name, because the chain of parents above it already spells the ancestry out. Join
 them with `/` to address one: `update` under `PlayerService` is `PlayerService/update`.
 
-`find_referencing_symbols` reports the reference line on its own. Pass `context_lines` to widen the
-snippet either side of it, remembering that each extra line is paid once per reference.
+`find_referencing_symbols` answers with `{ references, truncated }`, keyed by file the same way, and
+is capped by `tools.max_reference_matches` rather than by the listing cap, because a reference costs
+a snippet and a name path where a listing entry costs one path. It reports the reference line on its
+own; pass `context_lines` to widen the snippet either side of it, remembering that each extra line is
+paid once per reference.
 
 The language server's type signature for a symbol is omitted unless asked for. Pass
 `include_detail: true` to `get_symbols_overview`, `find_symbol`, or `find_declaration` when the
@@ -301,6 +304,7 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `project.ignored_paths` | empty | Extra gitignore-style exclusions |
 | `project.memory_only` | `false` | Run without the language server, see below |
 | `tools.excluded` | empty | Tool names to hide from the agent |
+| `tools.max_reference_matches` | `200` | Cap on references from `find_referencing_symbols` |
 
 ### Memory-only mode
 

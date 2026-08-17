@@ -50,11 +50,21 @@ pub struct SymbolSearchResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReferenceMatch {
-    pub relative_path: String,
     pub line: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub containing_symbol: Option<String>,
     pub snippet: String,
+}
+
+/// References keyed by the file they appear in, on the same reasoning as `SymbolsByFile`.
+pub type ReferencesByFile = BTreeMap<String, Vec<ReferenceMatch>>;
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReferenceSearchResult {
+    pub references: ReferencesByFile,
+    /// True when `max_reference_matches` cut the result set short. Omitted when false.
+    #[serde(skip_serializing_if = "crate::json::is_false")]
+    pub truncated: bool,
 }
 
 /// Severity is deliberately absent: it is already the key of the map this entry sits under.
@@ -298,17 +308,23 @@ impl<'a> SymbolQuery<'a> {
         relative_path: &str,
         max_results: usize,
         context_lines: usize,
-    ) -> Result<Vec<ReferenceMatch>> {
+    ) -> Result<ReferenceSearchResult> {
         let session = self.handle.session().await?;
         let (path, _, position) = self.locate_one(&session, name_path, relative_path).await?;
         let locations = session.references(&path, position, false).await?;
 
-        let mut references = Vec::new();
+        // Collecting one past the cap is what makes a complete result set distinguishable
+        // from a truncated one.
+        let probe = max_results.saturating_add(1);
+        let mut references: Vec<(String, ReferenceMatch)> = Vec::new();
+
         for location in locations
             .into_iter()
             .filter(|location| !is_declaration_site(location, &path, position))
-            .take(max_results)
         {
+            if references.len() >= probe {
+                break;
+            }
             let Ok(target) = uri::to_path(&location.uri) else {
                 continue;
             };
@@ -327,14 +343,22 @@ impl<'a> SymbolQuery<'a> {
                         .map(|node| node.name_path.clone())
                 });
 
-            references.push(ReferenceMatch {
-                relative_path: relative,
-                line: location.range.start.line + 1,
-                containing_symbol: containing,
-                snippet: snippet_around(&content, location.range.start.line, context_lines),
-            });
+            references.push((
+                relative,
+                ReferenceMatch {
+                    line: location.range.start.line + 1,
+                    containing_symbol: containing,
+                    snippet: snippet_around(&content, location.range.start.line, context_lines),
+                },
+            ));
         }
-        Ok(references)
+
+        let truncated = references.len() > max_results;
+        references.truncate(max_results);
+        Ok(ReferenceSearchResult {
+            references: group_by_file(references),
+            truncated,
+        })
     }
 
     async fn render_locations(
@@ -485,10 +509,10 @@ fn merge_severities(
     }
 }
 
-fn group_by_file(matches: Vec<(String, SymbolMatch)>) -> SymbolsByFile {
-    let mut grouped = SymbolsByFile::new();
-    for (relative_path, symbol) in matches {
-        grouped.entry(relative_path).or_default().push(symbol);
+fn group_by_file<T>(matches: Vec<(String, T)>) -> BTreeMap<String, Vec<T>> {
+    let mut grouped: BTreeMap<String, Vec<T>> = BTreeMap::new();
+    for (relative_path, item) in matches {
+        grouped.entry(relative_path).or_default().push(item);
     }
     grouped
 }

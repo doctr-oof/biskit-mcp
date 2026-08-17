@@ -104,3 +104,8 @@ tools:
   # max_answer_chars: 150000
   # max_listing_entries: 2000
   # max_pattern_matches: 200
+
+  # Cap on references returned by find_referencing_symbols. Kept separate from
+  # max_listing_entries because a reference carries a source snippet and a name
+  # path, where a listing entry is one path.
+  # max_reference_matches: 200

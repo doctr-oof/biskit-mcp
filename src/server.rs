@@ -508,7 +508,7 @@ impl Biskit {
             .find_referencing_symbols(
                 &request.name_path,
                 &request.relative_path,
-                self.inner.settings.tools.max_listing_entries,
+                self.inner.settings.tools.max_reference_matches,
                 request.context_lines,
             )
             .await
