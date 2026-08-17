@@ -63,9 +63,9 @@ param(
     $Repository = "doctr-oof/biskit-mcp"
 
     function Get-TargetAsset {
-        $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+        $architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
         switch ($architecture) {
-            "X64" { return "biskit-mcp-windows-x86_64.zip" }
+            "AMD64" { return "biskit-mcp-windows-x86_64.zip" }
             default { throw "Biskit does not publish a Windows build for $architecture." }
         }
     }
