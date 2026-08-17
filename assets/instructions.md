@@ -64,6 +64,8 @@ When file has two symbols of same name, `get_symbols_overview` labels them `User
 
 Top-level symbol in result carries full name path. Nested symbol under `children` carries only own leaf name, because ancestry already spelled by chain it sits under. Join with `/` to address it: child `update` under `PlayerService` is `PlayerService/update`.
 
+Table members sit under owner in `children`, so `depth` controls how much of table you see. `get_symbols_overview` defaults to `depth: 1`, which is owners plus their members; raise it for tables inside tables. `find_symbol` defaults to `depth: 0` — match alone, no members. Member nests only when owner itself declared in same file; member of table declared elsewhere stays top-level.
+
 `find_referencing_symbols` returns `{ references, truncated }`, `references` keyed by file same way. Cap is `tools.max_reference_matches`, default 200; `truncated: true` means hit it, so symbol has more call sites than you see.
 
 `find_referencing_symbols` snippet is reference line alone by default. Pass `context_lines: 1` or more when you need surrounding lines to judge how symbol used. Each extra line multiplies across every reference, so raise only when line itself not enough.
@@ -85,6 +87,8 @@ Do not write memory for: file contents (read it instead), transient task state, 
 Give memories meaningful names. Nest with `/` when topic has several parts, example `Combat/HitDetection`. Cross-reference other memories with `mem:` pointer in backticks, such as `` `mem:Combat/HitDetection` ``. `rename_memory` rewrites those pointers automatically.
 
 Use `edit_memory` to amend existing memory, not wholesale rewrite with `create_memory`. Wholesale rewrites lose detail that was there for reason. `create_memory` errors when name already taken; pass `overwrite: true` only when replacing content deliberately.
+
+`edit_memory` replacement expands `$1` and `${name}` as capture groups, so dollar sign meant literally must be written `$$`: `costs $$5`, not `costs $5`. Replacement naming group pattern does not define is refused, not silently emptied.
 
 ## Diagnostics severity
 

@@ -123,7 +123,8 @@ pub struct EditMemoryRequest {
     pub memory_name: String,
     /// Regular expression matched against the memory body.
     pub pattern: String,
-    /// Replacement text. Capture groups are available as `$1`, `$2`, and so on.
+    /// Replacement text. Capture groups are available as `$1`, `$2`, and `${name}`; write `$$` for
+    /// a literal dollar sign.
     pub replacement: String,
     /// Replace every match instead of erroring when the pattern is ambiguous.
     #[serde(default)]
@@ -179,8 +180,9 @@ pub struct SearchForPatternRequest {
 pub struct SymbolsOverviewRequest {
     /// Luau source file relative to the project root.
     pub relative_path: String,
-    /// How many levels of nested symbols to include. 0 lists top-level symbols only.
-    #[serde(default)]
+    /// How many levels of nested symbols to include. 0 lists top-level symbols only. Defaults to
+    /// 1, which is where the members of a table live.
+    #[serde(default = "default_overview_depth")]
     pub depth: u32,
     /// Include each symbol's type signature. Off by default because signatures are long.
     #[serde(default)]
@@ -289,6 +291,10 @@ fn project_root() -> String {
 
 fn default_max_matches() -> usize {
     50
+}
+
+fn default_overview_depth() -> u32 {
+    1
 }
 
 #[tool_router]

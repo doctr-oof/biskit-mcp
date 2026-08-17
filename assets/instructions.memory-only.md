@@ -69,3 +69,7 @@ Give memories meaningful names. Nest with `/` when topic has several parts, exam
 Use `edit_memory` to amend existing memory, not wholesale rewrite with `create_memory`. Wholesale
 rewrites lose detail that was there for reason. `create_memory` errors when name already taken;
 pass `overwrite: true` only when replacing content deliberately.
+
+`edit_memory` replacement expands `$1` and `${name}` as capture groups, so dollar sign meant
+literally must be written `$$`: `costs $$5`, not `costs $5`. Replacement naming group pattern does
+not define is refused, not silently emptied.
