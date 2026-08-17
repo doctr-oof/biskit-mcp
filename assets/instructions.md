@@ -7,9 +7,19 @@ Biskit = symbolic code-intelligence and project-memory server for this Luau proj
 1. **Project memory** — durable curated notes about project, survive between sessions.
 2. **Luau code intelligence** — symbol lookup, references, diagnostics from real language server, not text search.
 
-## Start of every session
+## Start of every session — mandatory, no exceptions
 
-Call `list_memories` first. Returns memory names only. Read ones whose names relate to task with `read_memory`. Not every memory.
+**Check project memory before you do anything else.** Before you answer a question, open a file, run a search, or plan an approach. This is a requirement, not a suggestion, and it applies to every session without exception — including short tasks and projects you believe you already understand.
+
+1. Call `list_memories` first. Returns memory names only.
+2. Call `read_memory` on every name that plausibly relates to the task. When unsure whether a memory is relevant, read it.
+3. Only then begin the work.
+
+You do not know what is in this project's memory until you look. Names alone tell you nothing, so `list_memories` on its own does not satisfy this step — an index you never read is an index you never used. If `initial_instructions` already handed you the memory index, you still must `read_memory` the relevant entries.
+
+Skipping this step is the most expensive mistake you can make here. Memories exist because that context does not survive between sessions: architectural decisions, invariants that look arbitrary until explained, workarounds with reasons behind them. Work started without them re-derives what was already settled, contradicts constraints nobody told you about, and produces changes the human has to reject.
+
+"None look relevant" is a conclusion you may reach only after reading the list, never before it. Reading the whole memory store is also wrong — select by name, then read.
 
 ## Choosing a tool
 
