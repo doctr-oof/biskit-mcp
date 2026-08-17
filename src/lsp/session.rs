@@ -387,6 +387,13 @@ impl LanguageServerHandle {
     }
 
     pub async fn session(&self) -> Result<Arc<Session>> {
+        if self.settings.project.memory_only {
+            bail!(
+                "Biskit is in memory-only mode, so the Luau language server is not available; \
+                 unset project.memory_only in .biskit/settings.yml to enable it"
+            );
+        }
+
         let mut guard = self.session.lock().await;
         if let Some(existing) = guard.as_ref() {
             return Ok(Arc::clone(existing));

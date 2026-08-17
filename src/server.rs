@@ -188,6 +188,17 @@ pub struct SymbolDiagnosticsRequest {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NoArguments {}
 
+/// Tools backed by the language server. Memory-only mode drops these routes entirely.
+const LANGUAGE_SERVER_TOOLS: [&str; 7] = [
+    "get_symbols_overview",
+    "find_symbol",
+    "find_declaration",
+    "find_referencing_symbols",
+    "get_file_diagnostics",
+    "get_symbol_diagnostics",
+    "restart_language_server",
+];
+
 fn project_root() -> String {
     ".".to_string()
 }
@@ -203,11 +214,23 @@ impl Biskit {
         let files = FileTools::new(project.clone(), settings.clone());
         let language_server = LanguageServerHandle::new(project, settings.clone());
 
+        let memory_only = settings.project.memory_only;
         let mut tool_router = Self::tool_router();
+        if memory_only {
+            for name in LANGUAGE_SERVER_TOOLS {
+                tool_router.remove_route(name);
+            }
+            tracing::info!(
+                target: "biskit",
+                "memory-only mode: the language server and its {} tools are disabled",
+                LANGUAGE_SERVER_TOOLS.len()
+            );
+        }
+
         for excluded in &settings.tools.excluded {
             if tool_router.has_route(excluded) {
                 tool_router.remove_route(excluded);
-            } else {
+            } else if !(memory_only && LANGUAGE_SERVER_TOOLS.contains(&excluded.as_str())) {
                 tracing::warn!(
                     target: "biskit",
                     "tools.excluded lists an unknown tool: {excluded}"
@@ -238,7 +261,10 @@ impl Biskit {
         Parameters(NoArguments {}): Parameters<NoArguments>,
     ) -> Result<CallToolResult, McpError> {
         let memories = self.inner.memories.list().map_err(fail)?;
-        text(prompts::initial_instructions(&memories))
+        text(prompts::initial_instructions(
+            &memories,
+            self.inner.settings.project.memory_only,
+        ))
     }
 
     #[tool(description = "Lists the names of every memory stored for this project.")]
@@ -499,11 +525,50 @@ impl Biskit {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open(memory_only: bool) -> (tempfile::TempDir, Biskit) {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::open(dir.path()).unwrap();
+        let settings = Settings {
+            project: crate::config::ProjectSettings {
+                memory_only,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        (dir, Biskit::new(project, settings))
+    }
+
+    #[test]
+    fn language_server_tools_are_routed_by_default() {
+        let (_dir, biskit) = open(false);
+        for name in LANGUAGE_SERVER_TOOLS {
+            assert!(biskit.tool_router.has_route(name), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn memory_only_drops_language_server_tools() {
+        let (_dir, biskit) = open(true);
+        for name in LANGUAGE_SERVER_TOOLS {
+            assert!(!biskit.tool_router.has_route(name), "still routed: {name}");
+        }
+        for name in ["initial_instructions", "list_memories", "search_for_pattern"] {
+            assert!(biskit.tool_router.has_route(name), "missing {name}");
+        }
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Biskit {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(prompts::CONNECTION_INSTRUCTIONS)
+            .with_instructions(prompts::connection_instructions(
+                self.inner.settings.project.memory_only,
+            ))
     }
 }

@@ -263,7 +263,23 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `lsp.sourcemap` | `sourcemap.json` | Rojo sourcemap path, or null to disable |
 | `lsp.server_settings` | empty | Raw luau-lsp settings in VS Code dotted-key form |
 | `project.ignored_paths` | empty | Extra gitignore-style exclusions |
+| `project.memory_only` | `false` | Run without the language server, see below |
 | `tools.excluded` | empty | Tool names to hide from the agent |
+
+### Memory-only mode
+
+Set `project.memory_only: true` to run Biskit as a memory, file, and search server with no Luau code
+intelligence at all:
+
+- luau-lsp is never downloaded and no language server process starts.
+- The seven code-intelligence tools are not registered, so the agent never sees them.
+- The MCP `instructions` field and `initial_instructions` both say the mode is on and name the tools
+  that are unavailable, so the agent does not waste turns reaching for them.
+- `biskit-mcp doctor` reports the mode and skips every LSP check.
+
+Memory, `list_dir`, `find_file`, and `search_for_pattern` keep working. This is what you want for a
+project that is not Luau, or on a machine that cannot reach the release asset. Put it in
+`settings.local.yml` to turn it on for yourself only.
 
 ## Commands
 

@@ -89,6 +89,12 @@ project:
   # Honour .gitignore and .git/info/exclude when walking the project.
   # respect_gitignore: true
 
+  # Run Biskit without the Luau language server. Nothing is downloaded, no
+  # luau-lsp process starts, and the symbol and diagnostic tools are not exposed
+  # to the agent. Memory, file, and search tools keep working. Useful for
+  # non-Luau projects and for machines that cannot fetch the release asset.
+  # memory_only: false
+
 tools:
   # Tool names to hide from the agent entirely.
   # excluded: []

@@ -137,6 +137,8 @@ impl RobloxSecurityLevel {
 pub struct ProjectSettings {
     pub ignored_paths: Vec<String>,
     pub respect_gitignore: bool,
+    /// Runs without the Luau language server: no acquisition, no process, no LSP-backed tools.
+    pub memory_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +182,7 @@ impl Default for ProjectSettings {
         Self {
             ignored_paths: Vec::new(),
             respect_gitignore: true,
+            memory_only: false,
         }
     }
 }
@@ -372,6 +375,20 @@ mod tests {
         .unwrap();
         assert_eq!(settings.lsp.version, DEFAULT_LSP_VERSION);
         assert!(settings.lsp.require_checksum);
+        assert!(!settings.project.memory_only);
+    }
+
+    #[test]
+    fn memory_only_can_be_enabled_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("settings.yml");
+        let local = dir.path().join("settings.local.yml");
+        std::fs::write(&base, "project:\n  respect_gitignore: false\n").unwrap();
+        std::fs::write(&local, "project:\n  memory_only: true\n").unwrap();
+
+        let settings = Settings::load(&base, &local).unwrap();
+        assert!(settings.project.memory_only);
+        assert!(!settings.project.respect_gitignore);
     }
 
     #[test]

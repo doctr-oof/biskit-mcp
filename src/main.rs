@@ -341,6 +341,14 @@ fn run_doctor(request: RootRequest) -> Result<()> {
     if !project.settings_path().exists() {
         println!("settings          defaults (run `biskit-mcp init` to write settings.yml)");
     }
+
+    if settings.project.memory_only {
+        println!("mode              memory-only (no language server, no LSP-backed tools)");
+        let memories = MemoryStore::new(project).list()?;
+        println!("memories          {}", memories.len());
+        return Ok(());
+    }
+
     println!("lsp version       {}", settings.lsp.version);
     println!("lsp repository    {}", settings.lsp.repository);
     println!("platform          {}", settings.lsp.platform.as_str());
@@ -385,12 +393,13 @@ fn run_doctor(request: RootRequest) -> Result<()> {
 
 fn run_session_start_hook(request: RootRequest) -> Result<()> {
     let opened = open_project(request)?;
+    let memory_only = opened.settings.project.memory_only;
     let memories = MemoryStore::new(opened.project).list()?;
 
     let payload = serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": prompts::initial_instructions(&memories),
+            "additionalContext": prompts::initial_instructions(&memories, memory_only),
         }
     });
     println!("{payload}");
