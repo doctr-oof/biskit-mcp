@@ -60,6 +60,8 @@ Top-level symbol in result carries full name path. Nested symbol under `children
 
 Type signatures omitted by default. Pass `include_detail: true` to `get_symbols_overview`, `find_symbol`, or `find_declaration` when you actually need signature, not just where symbol lives.
 
+Every tool result has size ceiling, `tools.max_answer_chars`. Structured result over ceiling refused outright with message naming what to narrow — half a JSON document unreadable. Text result, such as memory, cut instead and says how much withheld.
+
 ## After you edit code
 
 Biskit read source from disk each request, so edits visible immediately. After non-trivial edit, call `get_file_diagnostics` on changed file. If edit changed symbol signature or behavior, call `get_symbol_diagnostics` with `check_symbol_references: true` to catch breakage at call sites.

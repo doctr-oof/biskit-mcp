@@ -304,7 +304,12 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `project.ignored_paths` | empty | Extra gitignore-style exclusions |
 | `project.memory_only` | `false` | Run without the language server, see below |
 | `tools.excluded` | empty | Tool names to hide from the agent |
+| `tools.max_answer_chars` | `150000` | Ceiling on one tool result, 0 to lift it |
 | `tools.max_reference_matches` | `200` | Cap on references from `find_referencing_symbols` |
+
+A structured result over `max_answer_chars` is refused with a message naming what to narrow, since a
+JSON document cut in half cannot be read at all. A text result, such as a memory, is cut instead and
+says how much was withheld.
 
 ### Memory-only mode
 
