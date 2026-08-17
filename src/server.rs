@@ -556,7 +556,11 @@ mod tests {
         for name in LANGUAGE_SERVER_TOOLS {
             assert!(!biskit.tool_router.has_route(name), "still routed: {name}");
         }
-        for name in ["initial_instructions", "list_memories", "search_for_pattern"] {
+        for name in [
+            "initial_instructions",
+            "list_memories",
+            "search_for_pattern",
+        ] {
             assert!(biskit.tool_router.has_route(name), "missing {name}");
         }
     }
