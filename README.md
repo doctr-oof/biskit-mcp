@@ -1,61 +1,60 @@
-# Biskit MCP
+<p align="center">
+  <img src="https://raw.githubusercontent.com/doctr-oof/biskit-mcp/main/.github/logo.png" alt="Biskit MCP" width="200">
+</p>
+<h3 align="center">
+    Biskit MCP
+</h3>
+<br/>
 
-Project memory and Luau code intelligence over the Model Context Protocol.
+## What is Biskit?
 
-Biskit gives AI coding agents two things for a Roblox Luau project: a durable, curated memory store
-that survives between sessions, and symbol-level code intelligence backed by a real Luau language
-server instead of text search.
+Warm, airy, and vibe-coded to perfection: Biskit is a project memory management and Roblox Luau code intelligence MCP server made in Rust.
 
-Biskit never edits, creates, or deletes a source file. Agents keep using their own native editing
-tools. The only files Biskit writes are project memories and its own configuration.
+He (yes, it's a boy!) gives your agents the tools to:
+- Index, read, write, and modify project-level memories.
+- Access symbolic information through [Sawhorse's Luau LSP fork](https://github.com/Sawhorse-Interactive/luau-lsp-carpenter).
+- Perform directory, file, and pattern searches without needing to use token-expensive Grep/Glob/Bash tools.
+- Resolve Roblox datamodel types in projects that generate a `sourcemap.json`.
 
-## Why this exists
+He'll never edit or corrupt your source code. He'll never tell your agent how it should use its native tools. He's just a chill lil guy that wants to help your agent get the accurate information it needs.
 
-Biskit is inspired by [Serena](https://github.com/oraios/serena), but scoped to a single language.
-Where Serena supports around ninety language servers and ships a dashboard, a tray manager, and a
-JetBrains backend, Biskit is a single native binary with no runtime dependency, seventeen tools, and
-Rojo sourcemap support, so DataModel instance types actually resolve.
+> [!IMPORTANT]
+> Biskit is intended for Roblox Luau projects!
+> NEVER install Biskit globally if you work in standard Luau repositories.
 
-## Install
+## Quick Start
 
-Windows, PowerShell:
+### First-Time Install
+
+To install Biskit for the first time, open a terminal/PowerShell in your project's root directory and paste one of the following:
+
+#### Windows PowerShell (no Git Bash!):
 
 ```powershell
 irm https://raw.githubusercontent.com/doctr-oof/biskit-mcp/main/install.ps1 | iex
 ```
 
-macOS and Linux:
+#### macOS and Linux (also no Git Bash, use an actual terminal!):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/doctr-oof/biskit-mcp/main/install.sh | sh
 ```
-
-On Windows use the PowerShell installer even if you normally work in Git Bash or the VS Code
-terminal. The Windows build ships as a .zip and the install registers your user PATH, neither of
-which the shell installer does. WSL is the exception, since that is a real Linux target.
-
-Both installers verify the download against the published SHA256SUMS and refuse to install on a
-mismatch.
-
-Both then offer to register Biskit in a project for you. Nothing is written until you confirm, and
+Biskit will then offer to register Biskit in a project for you. Nothing is written until you confirm, and
 the step is skipped when no terminal is attached. See [Per-project setup](#per-project-setup) for
 what it writes and how to run the same thing later.
-
-To drive that step from a script, set `BISKIT_SETUP_CLIENTS` (any of `claude`, `cursor`, `vscode`)
-and optionally `BISKIT_SETUP_HOOKS=1` before running the installer, or set `BISKIT_NO_SETUP=1` to
-turn the whole thing off. The PowerShell installer accepts the same options as parameters when you
-run it from a file rather than through `irm`.
-
-Or register it with your agent yourself:
-
-```sh
-claude mcp add biskit -- biskit-mcp start
-```
 
 For Codex, add it to your MCP server configuration with the command `biskit-mcp` and the argument
 `start`.
 
-## Updating
+> [!TIP]
+> I strongly recommend you choose YES when asked about scoping Biskit to the current project!
+
+> [!IMPORTANT]
+> Both installers verify the download against the published SHA256SUMS and refuse to install on a mismatch.
+
+### Upgrading
+
+If you've already installed Biskit and want to upgrade, simply open a terminal and run the following:
 
 ```sh
 biskit-mcp upgrade
@@ -65,11 +64,6 @@ That replaces the running executable with the latest release and nothing else. I
 `.mcp.json`, `.claude/`, or `.biskit/`, so your existing project registrations keep working. Pass
 `--tag v0.1.4` to install a specific release, including an older one. The download is verified
 against SHA256SUMS and a mismatch aborts before anything is replaced.
-
-Windows cannot overwrite a running executable, so the current binary is renamed to
-`biskit-mcp.exe.old` before the new one takes its place. If an agent still has the server open, that
-file is cleaned up on the next upgrade instead. Restart any session that already had Biskit running
-to pick up the new build.
 
 ## Per-project setup
 
@@ -128,6 +122,29 @@ A `.biskit/` folder wins over `.git/` and `default.project.json` no matter how f
 sits. When no ancestor has one, the nearest `.git/` or `default.project.json` wins instead. Run
 `biskit-mcp doctor` to see which root was chosen and how.
 
+## Session start hook
+
+Biskit sets the MCP `instructions` field, which every compliant client surfaces. For Claude Code you
+can additionally inject the manual and memory index at session start.
+
+`biskit-mcp setup --hooks` writes this to `.claude/settings.local.json`, which is personal and
+normally gitignored. Pass `--hooks-target shared` to put it in `.claude/settings.json` instead,
+where everyone who clones the repository picks it up. Either way the entry looks like this:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "biskit-mcp hook session-start" }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ## First run
 
 `biskit-mcp start` does not create a `.biskit/` folder on its own. It runs on built-in defaults
@@ -175,115 +192,20 @@ takes effect without a restart. Set `lsp.watch_sourcemap: false` to disable the 
 
 ## Tools
 
-Memory:
+These are all of the tools Biskit provides your agent. You can exclude them via the `tools.excluded` configuration.
 
-| Tool | Purpose |
-|---|---|
-| `list_memories` | Names of every stored memory |
-| `read_memory` | Read one memory |
-| `create_memory` | Write a new memory, refusing an existing name unless `overwrite` is set |
-| `edit_memory` | Regex replace inside a memory |
-| `rename_memory` | Rename or move, rewriting `mem:` references |
-| `delete_memory` | Delete a memory |
-
-Code intelligence:
-
-| Tool | Purpose |
-|---|---|
-| `get_symbols_overview` | Symbols defined in a file |
-| `find_symbol` | Find symbols by name path |
-| `find_declaration` | Where a symbol is declared |
-| `find_referencing_symbols` | Every caller or user of a symbol |
-| `get_file_diagnostics` | Type errors and warnings for a file |
-| `get_symbol_diagnostics` | Diagnostics for a symbol and its callers |
-| `restart_language_server` | Restart the Luau language server |
-
-Files and orientation:
-
-| Tool | Purpose |
-|---|---|
-| `list_dir` | List a directory |
-| `find_file` | Find files by glob |
-| `search_for_pattern` | Regex search over file contents |
-| `initial_instructions` | Usage manual plus the memory index |
-
-There is no `find_implementations`, since Luau has no interface or implementation relation. Use
-`find_referencing_symbols` instead.
-
-### Name paths
-
-Symbols are addressed by name path. Slashes, dots, and colons are interchangeable, so an agent does
-not have to guess:
-
-| Pattern | Matches |
-|---|---|
-| `update` | any symbol named `update`, at any depth |
-| `PlayerService/update` | `update` directly inside `PlayerService` |
-| `PlayerService.update` | the same thing |
-| `PlayerService:update` | the same thing |
-| `/PlayerService` | only a top-level `PlayerService` |
-| `UserInfo[1]` | the second of two same-named `UserInfo` symbols |
-
-luau-lsp reports members as flat names, dot-separated for fields such as `PlayerService.addScore`
-and colon-separated for methods such as `PlayerService:addScore`. Biskit splits both into name path
-segments, so a method is reachable by its own name without naming the table that owns it, and LSP
-requests anchor on the method rather than on that table.
-
-Symbols that share a name within one file are listed as `UserInfo[0]` and `UserInfo[1]`. Those
-labels can be passed straight back in, which is the only way to address one of them with
-`find_declaration`, `find_referencing_symbols`, or `get_symbol_diagnostics`.
-
-Response shapes:
-
-- `find_symbol` answers with `{ symbols, truncated }`, where `truncated` reports whether
-  `max_matches` cut the result set short and is omitted when nothing was cut. `list_dir` and
-  `search_for_pattern` report truncation the same way.
-- `find_symbol` and `find_declaration` key results by file path, and the symbols under a key carry
-  no path of their own. `get_symbols_overview` answers with a bare list.
-- `list_dir` answers with `{ base, directories, files }`, with every entry named relative to `base`.
-  Join the two with `/` for a project-relative path. `find_file` and `search_for_pattern` answer
-  with full project-relative paths.
-- A symbol at the top of a result carries its full name path. A symbol nested under `children`
-  carries only its own leaf name. Join them with `/` to address one: `update` under `PlayerService`
-  is `PlayerService/update`.
-
-`find_referencing_symbols` answers with `{ references, truncated }`, keyed by file the same way, and
-is capped by `tools.max_reference_matches` rather than by the listing cap. It reports the reference
-line on its own; pass `context_lines` to widen the snippet either side of it, at the cost of one
-extra line per reference.
-
-The language server's type signature for a symbol is omitted unless asked for. Pass
-`include_detail: true` to `get_symbols_overview`, `find_symbol`, or `find_declaration` when the
-signature is what you are after rather than the location.
+- **Memory**: `list_memories`, `read_memory`, `create_memory`, `edit_memory`, `rename_memory`,
+  `delete_memory`.
+- **Code intelligence**: `get_symbols_overview`, `find_symbol`, `find_declaration`,
+  `find_referencing_symbols`, `get_file_diagnostics`, `get_symbol_diagnostics`,
+  `restart_language_server`.
+- **Files and orientation**: `list_dir`, `find_file`, `search_for_pattern`, `initial_instructions`.
 
 ### Memories
 
 Memories are plain markdown under `.biskit/memories/`, nestable to any depth. Reference one from
 another with a `mem:` pointer in backticks, such as `` `mem:combat/hit-detection` ``.
 `rename_memory` rewrites those pointers for you.
-
-## Session start hook
-
-Biskit sets the MCP `instructions` field, which every compliant client surfaces. For Claude Code you
-can additionally inject the manual and memory index at session start.
-
-`biskit-mcp setup --hooks` writes this to `.claude/settings.local.json`, which is personal and
-normally gitignored. Pass `--hooks-target shared` to put it in `.claude/settings.json` instead,
-where everyone who clones the repository picks it up. Either way the entry looks like this:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          { "type": "command", "command": "biskit-mcp hook session-start" }
-        ]
-      }
-    ]
-  }
-}
-```
 
 ## Configuration
 
