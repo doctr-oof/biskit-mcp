@@ -2,13 +2,19 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::bail_hint;
+
 pub const BISKIT_DIR: &str = ".biskit";
 pub const MEMORIES_DIR: &str = "memories";
-pub const CACHE_DIR: &str = "cache";
 pub const SETTINGS_FILE: &str = "settings.yml";
 pub const LOCAL_SETTINGS_FILE: &str = "settings.local.yml";
 
-const GITIGNORE_CONTENTS: &str = "cache/\nsettings.local.yml\n";
+const GITIGNORE_CONTENTS: &str = "settings.local.yml\n";
+
+const RELATIVE_PATH_HINT: &str = "pass a path relative to the project root, such as \
+                                  \"src/init.luau\", or \".\" for the root itself";
+const ESCAPED_ROOT_HINT: &str = "Biskit only reads inside the project root; drop the leading \
+                                 \"..\" segments";
 
 /// Markers consulted only when no ancestor holds a `.biskit` directory.
 const FALLBACK_MARKERS: [&str; 2] = [".git", "default.project.json"];
@@ -43,10 +49,6 @@ impl Project {
         self.biskit_dir().join(MEMORIES_DIR)
     }
 
-    pub fn cache_dir(&self) -> PathBuf {
-        self.biskit_dir().join(CACHE_DIR)
-    }
-
     pub fn settings_path(&self) -> PathBuf {
         self.biskit_dir().join(SETTINGS_FILE)
     }
@@ -61,7 +63,6 @@ impl Project {
         report.created_biskit_dir = !biskit.exists();
 
         std::fs::create_dir_all(self.memories_dir())?;
-        std::fs::create_dir_all(self.cache_dir())?;
 
         let gitignore = biskit.join(".gitignore");
         if !gitignore.exists() {
@@ -88,7 +89,7 @@ impl Project {
     pub fn resolve(&self, relative: &str) -> Result<PathBuf> {
         let candidate = Path::new(relative);
         if candidate.is_absolute() {
-            bail!("path must be relative to the project root: {relative}");
+            bail_hint!(RELATIVE_PATH_HINT; "path must be relative to the project root: {relative}");
         }
 
         let mut resolved = self.root.clone();
@@ -98,17 +99,20 @@ impl Project {
                 Component::CurDir => {}
                 Component::ParentDir => {
                     if !resolved.pop() || !resolved.starts_with(&self.root) {
-                        bail!("path escapes the project root: {relative}");
+                        bail_hint!(ESCAPED_ROOT_HINT; "path escapes the project root: {relative}");
                     }
                 }
                 Component::RootDir | Component::Prefix(_) => {
-                    bail!("path must be relative to the project root: {relative}")
+                    bail_hint!(
+                        RELATIVE_PATH_HINT;
+                        "path must be relative to the project root: {relative}"
+                    )
                 }
             }
         }
 
         if !resolved.starts_with(&self.root) {
-            bail!("path escapes the project root: {relative}");
+            bail_hint!(ESCAPED_ROOT_HINT; "path escapes the project root: {relative}");
         }
         Ok(resolved)
     }

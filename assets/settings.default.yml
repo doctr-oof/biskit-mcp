@@ -101,6 +101,17 @@ tools:
 
   # Truncation thresholds. Raise them if you are routinely losing results,
   # lower them to keep responses small.
+
+  # Ceiling on a single tool result. A structured result over the ceiling is
+  # refused with a message naming what to narrow, because half a JSON document
+  # cannot be read; a text result, such as a memory, is cut and says so. Set to
+  # 0 to lift the ceiling entirely.
   # max_answer_chars: 150000
+
   # max_listing_entries: 2000
   # max_pattern_matches: 200
+
+  # Cap on references returned by find_referencing_symbols. Kept separate from
+  # max_listing_entries because a reference carries a source snippet and a name
+  # path, where a listing entry is one path.
+  # max_reference_matches: 200

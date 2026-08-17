@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 use serde::Serialize;
 
 use super::name_path::NamePathPattern;
@@ -9,7 +9,16 @@ use super::protocol::{Diagnostic, Location, Position, Severity, is_low_level_kin
 use super::session::{LanguageServerHandle, Session, ensure_luau_file};
 use super::symbols::SymbolNode;
 use super::uri;
+use crate::bail_hint;
 use crate::project::Project;
+
+const NAME_PATH_HINT: &str = "a name path is a symbol name such as \"update\", optionally \
+                              qualified with its owners as \"PlayerService:update\"; prefix \"/\" \
+                              to anchor it to the top level of the file";
+
+/// Lines either side of a declaration reported with `include_body`. A declaration whose own symbol
+/// could not be resolved has only its line to show, so one line of context earns its place there.
+const DECLARATION_CONTEXT_LINES: usize = 1;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolMatch {
@@ -17,7 +26,6 @@ pub struct SymbolMatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_path: Option<String>,
     pub kind: String,
-    pub relative_path: String,
     pub start_line: u32,
     pub end_line: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -28,26 +36,41 @@ pub struct SymbolMatch {
     pub children: Vec<SymbolMatch>,
 }
 
+/// Symbols keyed by the file that defines them, so a path is spelled once per file rather than
+/// once per symbol.
+pub type SymbolsByFile = BTreeMap<String, Vec<SymbolMatch>>;
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SymbolSearchResult {
-    pub symbols: Vec<SymbolMatch>,
-    /// True when `max_matches` cut the result set short.
+    pub symbols: SymbolsByFile,
+    /// True when `max_matches` cut the result set short. Omitted when false.
+    #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReferenceMatch {
-    pub relative_path: String,
     pub line: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub containing_symbol: Option<String>,
     pub snippet: String,
 }
 
+/// References keyed by the file they appear in, on the same reasoning as `SymbolsByFile`.
+pub type ReferencesByFile = BTreeMap<String, Vec<ReferenceMatch>>;
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReferenceSearchResult {
+    pub references: ReferencesByFile,
+    /// True when `max_reference_matches` cut the result set short. Omitted when false.
+    #[serde(skip_serializing_if = "crate::json::is_false")]
+    pub truncated: bool,
+}
+
+/// Severity is deliberately absent: it is already the key of the map this entry sits under.
 #[derive(Debug, Clone, Serialize)]
 pub struct DiagnosticEntry {
     pub line: u32,
-    pub severity: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
@@ -69,12 +92,22 @@ pub struct SymbolQuery<'a> {
     pub handle: &'a LanguageServerHandle,
 }
 
+/// What a rendered symbol carries beyond its name, kind, and line range. `detail` is the language
+/// server's type signature, which is long enough to be worth asking for rather than assuming.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderOptions {
+    pub depth: u32,
+    pub include_body: bool,
+    pub include_detail: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct FindSymbolRequest {
     pub name_path: String,
     pub relative_path: Option<String>,
     pub depth: u32,
     pub include_body: bool,
+    pub include_detail: bool,
     pub include_kinds: Vec<u32>,
     pub exclude_kinds: Vec<u32>,
     pub substring_matching: bool,
@@ -101,7 +134,11 @@ impl<'a> SymbolQuery<'a> {
             return Ok(vec![resolved]);
         }
         if !resolved.is_dir() {
-            bail!("no such file or directory: {relative}");
+            bail_hint!(
+                "locate the path with find_file or list_dir, or omit relative_path to search the \
+                 whole project";
+                "no such file or directory: {relative}"
+            );
         }
 
         let all = self.handle.resolve_luau_files().await?;
@@ -114,7 +151,7 @@ impl<'a> SymbolQuery<'a> {
     pub async fn find_symbol(&self, request: FindSymbolRequest) -> Result<SymbolSearchResult> {
         let pattern = NamePathPattern::parse(&request.name_path, request.substring_matching);
         if pattern.is_empty() {
-            bail!("name_path must not be empty");
+            bail_hint!(NAME_PATH_HINT; "name_path must not be empty");
         }
 
         let session = self.handle.session().await?;
@@ -124,7 +161,7 @@ impl<'a> SymbolQuery<'a> {
         // Collecting one past the cap is what makes a complete result set distinguishable
         // from a truncated one.
         let probe = request.max_matches.saturating_add(1);
-        let mut matches = Vec::new();
+        let mut matches: Vec<(String, SymbolMatch)> = Vec::new();
 
         for path in files {
             if matches.len() >= probe {
@@ -136,21 +173,22 @@ impl<'a> SymbolQuery<'a> {
             let content = session.ensure_open(&path).await?;
             let relative = self.project().relativize(&path)?;
 
+            let mut found = Vec::new();
             collect_matches(
                 &symbols,
                 &pattern,
                 &request,
-                probe,
-                &relative,
+                probe - matches.len(),
                 &content,
-                &mut matches,
+                &mut found,
             );
+            matches.extend(found.into_iter().map(|symbol| (relative.clone(), symbol)));
         }
 
         let truncated = matches.len() > request.max_matches;
         matches.truncate(request.max_matches);
         Ok(SymbolSearchResult {
-            symbols: matches,
+            symbols: group_by_file(matches),
             truncated,
         })
     }
@@ -159,6 +197,7 @@ impl<'a> SymbolQuery<'a> {
         &self,
         relative_path: &str,
         depth: u32,
+        include_detail: bool,
     ) -> Result<Vec<SymbolMatch>> {
         let path = self.project().resolve(relative_path)?;
         ensure_luau_file(&path)?;
@@ -167,11 +206,17 @@ impl<'a> SymbolQuery<'a> {
         let symbols = session.document_symbols(&path).await?;
         let content = session.ensure_open(&path).await?;
 
+        let options = RenderOptions {
+            depth,
+            include_body: false,
+            include_detail,
+        };
+
         // Low-level kinds are pruned from children, not from the top level: a module whose
         // only top-level symbols are variables would otherwise look like an empty file.
         Ok(symbols
             .iter()
-            .map(|symbol| render(symbol, relative_path, &content, depth, false))
+            .map(|symbol| render(symbol, &content, options))
             .collect())
     }
 
@@ -199,7 +244,13 @@ impl<'a> SymbolQuery<'a> {
         }
 
         match found.len() {
-            0 => bail!("no symbol matching {name_path} in {relative_path}"),
+            0 => bail_hint!(
+                format!(
+                    "name paths are case-sensitive; call get_symbols_overview on {relative_path} \
+                     to see what it defines. {NAME_PATH_HINT}"
+                );
+                "no symbol matching {name_path} in {relative_path}"
+            ),
             1 => {
                 let symbol = found.remove(0);
                 let position = symbol.target_position(&content);
@@ -207,9 +258,13 @@ impl<'a> SymbolQuery<'a> {
             }
             count => {
                 let names: Vec<&str> = found.iter().map(|node| node.name_path.as_str()).collect();
-                bail!(
-                    "{name_path} is ambiguous in {relative_path}: {count} matches ({}). \
-                     Use a more specific name path.",
+                bail_hint!(
+                    format!(
+                        "name one of them in full, for example \"{}\"; same-named siblings are \
+                         addressed by index, as in \"{name_path}[0]\"",
+                        names[0]
+                    );
+                    "{name_path} is ambiguous in {relative_path}: {count} matches ({})",
                     names.join(", ")
                 )
             }
@@ -221,7 +276,8 @@ impl<'a> SymbolQuery<'a> {
         name_path: &str,
         relative_path: &str,
         include_body: bool,
-    ) -> Result<Vec<SymbolMatch>> {
+        include_detail: bool,
+    ) -> Result<SymbolsByFile> {
         let session = self.handle.session().await?;
         let (path, symbol, position) = self.locate_one(&session, name_path, relative_path).await?;
         let locations = session.definition(&path, position).await?;
@@ -231,10 +287,18 @@ impl<'a> SymbolQuery<'a> {
         if locations.is_empty() {
             let content = session.ensure_open(&path).await?;
             let relative = self.project().relativize(&path)?;
-            return Ok(vec![render(&symbol, &relative, &content, 0, include_body)]);
+            let options = RenderOptions {
+                depth: 0,
+                include_body,
+                include_detail,
+            };
+            return Ok(SymbolsByFile::from([(
+                relative,
+                vec![render(&symbol, &content, options)],
+            )]));
         }
 
-        self.render_locations(&session, locations, include_body)
+        self.render_locations(&session, locations, include_body, include_detail)
             .await
     }
 
@@ -243,17 +307,24 @@ impl<'a> SymbolQuery<'a> {
         name_path: &str,
         relative_path: &str,
         max_results: usize,
-    ) -> Result<Vec<ReferenceMatch>> {
+        context_lines: usize,
+    ) -> Result<ReferenceSearchResult> {
         let session = self.handle.session().await?;
         let (path, _, position) = self.locate_one(&session, name_path, relative_path).await?;
         let locations = session.references(&path, position, false).await?;
 
-        let mut references = Vec::new();
+        // Collecting one past the cap is what makes a complete result set distinguishable
+        // from a truncated one.
+        let probe = max_results.saturating_add(1);
+        let mut references: Vec<(String, ReferenceMatch)> = Vec::new();
+
         for location in locations
             .into_iter()
             .filter(|location| !is_declaration_site(location, &path, position))
-            .take(max_results)
         {
+            if references.len() >= probe {
+                break;
+            }
             let Ok(target) = uri::to_path(&location.uri) else {
                 continue;
             };
@@ -272,14 +343,22 @@ impl<'a> SymbolQuery<'a> {
                         .map(|node| node.name_path.clone())
                 });
 
-            references.push(ReferenceMatch {
-                relative_path: relative,
-                line: location.range.start.line + 1,
-                containing_symbol: containing,
-                snippet: snippet_around(&content, location.range.start.line),
-            });
+            references.push((
+                relative,
+                ReferenceMatch {
+                    line: location.range.start.line + 1,
+                    containing_symbol: containing,
+                    snippet: snippet_around(&content, location.range.start.line, context_lines),
+                },
+            ));
         }
-        Ok(references)
+
+        let truncated = references.len() > max_results;
+        references.truncate(max_results);
+        Ok(ReferenceSearchResult {
+            references: group_by_file(references),
+            truncated,
+        })
     }
 
     async fn render_locations(
@@ -287,8 +366,9 @@ impl<'a> SymbolQuery<'a> {
         session: &Session,
         locations: Vec<Location>,
         include_body: bool,
-    ) -> Result<Vec<SymbolMatch>> {
-        let mut rendered = Vec::new();
+        include_detail: bool,
+    ) -> Result<SymbolsByFile> {
+        let mut rendered = SymbolsByFile::new();
         for location in locations {
             let Ok(target) = uri::to_path(&location.uri) else {
                 continue;
@@ -300,20 +380,25 @@ impl<'a> SymbolQuery<'a> {
             let node = SymbolNode::innermost_at(&symbols, location.range.start);
             let body = if include_body {
                 let content = session.ensure_open(&target).await?;
-                Some(snippet_around(&content, location.range.start.line))
+                Some(snippet_around(
+                    &content,
+                    location.range.start.line,
+                    DECLARATION_CONTEXT_LINES,
+                ))
             } else {
                 None
             };
 
-            rendered.push(SymbolMatch {
+            rendered.entry(relative).or_default().push(SymbolMatch {
                 name_path: node.map(|found| found.name_path.clone()),
                 kind: node
                     .map(|found| found.kind_label().to_string())
                     .unwrap_or_else(|| "Unknown".to_string()),
-                relative_path: relative,
                 start_line: location.range.start.line + 1,
                 end_line: location.range.end.line + 1,
-                detail: node.and_then(|found| found.detail.clone()),
+                detail: include_detail
+                    .then(|| node.and_then(|found| found.detail.clone()))
+                    .flatten(),
                 body,
                 children: Vec::new(),
             });
@@ -424,12 +509,19 @@ fn merge_severities(
     }
 }
 
+fn group_by_file<T>(matches: Vec<(String, T)>) -> BTreeMap<String, Vec<T>> {
+    let mut grouped: BTreeMap<String, Vec<T>> = BTreeMap::new();
+    for (relative_path, item) in matches {
+        grouped.entry(relative_path).or_default().push(item);
+    }
+    grouped
+}
+
 fn collect_matches(
     nodes: &[SymbolNode],
     pattern: &NamePathPattern,
     request: &FindSymbolRequest,
     limit: usize,
-    relative_path: &str,
     content: &str,
     out: &mut Vec<SymbolMatch>,
 ) {
@@ -444,49 +536,70 @@ fn collect_matches(
         if kind_allowed && pattern.matches(&node.ancestors()) {
             out.push(render(
                 node,
-                relative_path,
                 content,
-                request.depth,
-                request.include_body,
+                RenderOptions {
+                    depth: request.depth,
+                    include_body: request.include_body,
+                    include_detail: request.include_detail,
+                },
             ));
         }
-        collect_matches(
-            &node.children,
-            pattern,
-            request,
-            limit,
-            relative_path,
-            content,
-            out,
-        );
+        collect_matches(&node.children, pattern, request, limit, content, out);
     }
 }
 
-fn render(
+/// Renders a symbol that sits at the top of a result, named by its full name path.
+fn render(node: &SymbolNode, content: &str, options: RenderOptions) -> SymbolMatch {
+    render_node(node, content, options, true)
+}
+
+/// Renders a nested symbol, named by its own leaf segment. The ancestry is already spelled out by
+/// the chain of parents it sits under, so repeating it would cost the caller the prefix on every
+/// child. Join a child's name to its parent's name path with `/` to address it.
+fn render_child(node: &SymbolNode, content: &str, options: RenderOptions) -> SymbolMatch {
+    let options = RenderOptions {
+        include_body: false,
+        ..options
+    };
+    render_node(node, content, options, false)
+}
+
+fn render_node(
     node: &SymbolNode,
-    relative_path: &str,
     content: &str,
-    depth: u32,
-    include_body: bool,
+    options: RenderOptions,
+    full_name_path: bool,
 ) -> SymbolMatch {
-    let children = if depth == 0 {
+    let children = if options.depth == 0 {
         Vec::new()
     } else {
+        let nested = RenderOptions {
+            depth: options.depth - 1,
+            ..options
+        };
         node.children
             .iter()
             .filter(|child| !is_low_level_kind(child.kind))
-            .map(|child| render(child, relative_path, content, depth - 1, false))
+            .map(|child| render_child(child, content, nested))
             .collect()
     };
 
+    let name = if full_name_path {
+        node.name_path.clone()
+    } else {
+        node.name.clone()
+    };
+
     SymbolMatch {
-        name_path: Some(node.name_path.clone()),
+        name_path: Some(name),
         kind: node.kind_label().to_string(),
-        relative_path: relative_path.to_string(),
         start_line: node.range.start.line + 1,
         end_line: node.range.end.line + 1,
-        detail: node.detail.clone(),
-        body: include_body.then(|| extract_body(content, node)),
+        detail: options
+            .include_detail
+            .then(|| node.detail.clone())
+            .flatten(),
+        body: options.include_body.then(|| extract_body(content, node)),
         children,
     }
 }
@@ -504,14 +617,15 @@ fn extract_body(content: &str, node: &SymbolNode) -> String {
     lines[start..=end].join("\n")
 }
 
-fn snippet_around(content: &str, line: u32) -> String {
+/// The line at `line`, widened by `context` lines on each side.
+fn snippet_around(content: &str, line: u32, context: usize) -> String {
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
         return String::new();
     }
     let index = (line as usize).min(lines.len().saturating_sub(1));
-    let start = index.saturating_sub(1);
-    let end = (index + 1).min(lines.len().saturating_sub(1));
+    let start = index.saturating_sub(context);
+    let end = (index + context).min(lines.len().saturating_sub(1));
     lines[start..=end].join("\n")
 }
 
@@ -535,7 +649,6 @@ fn group_diagnostics(
 
         let entry = DiagnosticEntry {
             line: diagnostic.range.start.line + 1,
-            severity: severity.label().to_string(),
             message: diagnostic.message,
             code: diagnostic.code.map(|code| match code {
                 serde_json::Value::String(text) => text,
@@ -557,8 +670,12 @@ pub fn severity_from_input(value: Option<u32>) -> Result<Severity> {
         2 => Ok(Severity::Warning),
         3 => Ok(Severity::Information),
         4 => Ok(Severity::Hint),
-        other => Err(anyhow!(
-            "min_severity must be 1 (error), 2 (warning), 3 (information), or 4 (hint), got {other}"
+        other => Err(crate::errors::hinted(
+            format!(
+                "min_severity must be 1 (error), 2 (warning), 3 (information), or 4 (hint), got \
+                 {other}"
+            ),
+            "omit min_severity to report errors and warnings",
         )),
     }
 }

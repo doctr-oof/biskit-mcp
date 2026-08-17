@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
@@ -15,6 +15,7 @@ use super::protocol::{
 };
 use super::symbols::{SymbolNode, build_tree};
 use super::uri;
+use crate::bail_hint;
 use crate::config::Settings;
 use crate::project::Project;
 
@@ -388,9 +389,10 @@ impl LanguageServerHandle {
 
     pub async fn session(&self) -> Result<Arc<Session>> {
         if self.settings.project.memory_only {
-            bail!(
-                "Biskit is in memory-only mode, so the Luau language server is not available; \
-                 unset project.memory_only in .biskit/settings.yml to enable it"
+            bail_hint!(
+                "set project.memory_only to false in .biskit/settings.yml and restart the server, \
+                 or use search_for_pattern and find_file instead";
+                "Biskit is in memory-only mode, so the Luau language server is not available"
             );
         }
 
@@ -480,8 +482,10 @@ pub fn ensure_luau_file(path: &Path) -> Result<()> {
     if matches!(extension, Some("luau" | "lua")) {
         return Ok(());
     }
-    bail!(
-        "{} is not a Luau source file; Biskit's symbol tools only work on .luau and .lua",
+    bail_hint!(
+        "the symbol tools only read .luau and .lua; locate one with find_file using the mask \
+         \"*.luau\", or use search_for_pattern for other file types";
+        "not a Luau source file: {}",
         path.display()
     )
 }

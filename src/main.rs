@@ -1,5 +1,7 @@
 mod config;
+mod errors;
 mod files;
+mod json;
 mod lsp;
 mod memory;
 mod project;

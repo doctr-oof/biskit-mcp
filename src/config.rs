@@ -148,6 +148,7 @@ pub struct ToolSettings {
     pub max_answer_chars: usize,
     pub max_listing_entries: usize,
     pub max_pattern_matches: usize,
+    pub max_reference_matches: usize,
 }
 
 impl Default for LspSettings {
@@ -194,6 +195,7 @@ impl Default for ToolSettings {
             max_answer_chars: 150_000,
             max_listing_entries: 2_000,
             max_pattern_matches: 200,
+            max_reference_matches: 200,
         }
     }
 }
