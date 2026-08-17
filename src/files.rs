@@ -28,6 +28,8 @@ pub struct FileTools {
 pub struct DirectoryListing {
     pub directories: Vec<String>,
     pub files: Vec<String>,
+    /// True when `max_listing_entries` cut the listing short. Omitted when false.
+    #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
 }
 
@@ -41,6 +43,8 @@ pub struct PatternMatch {
 #[derive(Debug, Default, Serialize)]
 pub struct PatternSearchResult {
     pub matches: BTreeMap<String, Vec<PatternMatch>>,
+    /// True when `max_pattern_matches` cut the result set short. Omitted when false.
+    #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
 }
 

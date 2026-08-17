@@ -46,7 +46,7 @@ Set `substring_matching: true` to match final segment loosely when you know only
 
 When file has two symbols of same name, `get_symbols_overview` labels them `UserInfo[0]` and `UserInfo[1]`. Pass label back verbatim to address exactly one. Bare `UserInfo` matches both. Tools taking single symbol (`find_declaration`, `find_referencing_symbols`, `get_symbol_diagnostics`) error on ambiguous name — use indexed form there.
 
-`find_symbol` returns `{ symbols, truncated }`. `truncated: true` means `max_matches` cut result short: narrow with `relative_path` or raise cap.
+`find_symbol` returns `{ symbols, truncated }`. `truncated: true` means `max_matches` cut result short: narrow with `relative_path` or raise cap. Field omitted entirely when nothing was cut, so absent = complete. Same for `list_dir` and `search_for_pattern`.
 
 ## After you edit code
 

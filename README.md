@@ -231,7 +231,8 @@ labels can be passed straight back in, which is the only way to address one of t
 `find_declaration`, `find_referencing_symbols`, or `get_symbol_diagnostics`.
 
 `find_symbol` answers with `{ symbols, truncated }`, where `truncated` reports whether `max_matches`
-cut the result set short.
+cut the result set short. The flag is omitted when nothing was cut, so an absent `truncated` means a
+complete result. `list_dir` and `search_for_pattern` report truncation the same way.
 
 ### Memories
 

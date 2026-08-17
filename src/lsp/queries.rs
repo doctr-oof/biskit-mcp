@@ -36,7 +36,8 @@ pub struct SymbolMatch {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SymbolSearchResult {
     pub symbols: Vec<SymbolMatch>,
-    /// True when `max_matches` cut the result set short.
+    /// True when `max_matches` cut the result set short. Omitted when false.
+    #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
 }
 
