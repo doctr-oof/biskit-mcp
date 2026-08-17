@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::name_path::strip_overload_suffix;
 use super::protocol::{DocumentSymbol, DocumentSymbolResponse, Position, Range, symbol_kind_label};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,9 +27,9 @@ impl SymbolNode {
         self.range.contains(position)
     }
 
-    /// Position to aim LSP requests at. For a dotted member the selection range starts on the
-    /// containing table, which would resolve references to the table instead of the member,
-    /// so seek forward to the leaf name.
+    /// Position to aim LSP requests at. For a dotted or colon member the selection range starts
+    /// on the containing table, which would resolve references to the table instead of the
+    /// member, so seek forward to the leaf name.
     pub fn target_position(&self, content: &str) -> Position {
         let start = self.selection_range.start;
         let Some(line) = content.lines().nth(start.line as usize) else {
@@ -37,7 +38,7 @@ impl SymbolNode {
 
         let from = (start.character as usize).min(line.len());
         let window = &line[from..];
-        let Some(offset) = find_identifier(window, &self.name) else {
+        let Some(offset) = find_identifier(window, strip_overload_suffix(&self.name)) else {
             return start;
         };
         Position {
@@ -119,9 +120,13 @@ fn convert_siblings(symbols: &[DocumentSymbol], prefix: &str) -> Vec<SymbolNode>
         .iter()
         .zip(disambiguated)
         .map(|(symbol, name)| {
-            // luau-lsp reports members flat and dot-separated ("PlayerService.addScore"),
-            // so the dots become name path segments and the leaf becomes the display name.
-            let segments: Vec<&str> = name.split('.').filter(|part| !part.is_empty()).collect();
+            // luau-lsp reports members flat, dot-separated for fields ("PlayerService.addScore")
+            // and colon-separated for methods ("PlayerService:addScore"), so both separators
+            // become name path segments and the leaf becomes the display name.
+            let segments: Vec<&str> = name
+                .split(['.', ':'])
+                .filter(|part| !part.is_empty())
+                .collect();
             let leaf = segments
                 .last()
                 .copied()
@@ -222,6 +227,75 @@ mod tests {
         assert_eq!(
             tree[0].ancestors(),
             vec!["PlayerService".to_string(), "addScore".to_string()]
+        );
+    }
+
+    #[test]
+    fn colon_luau_method_names_become_name_path_segments() {
+        let tree = build_tree(DocumentSymbolResponse::Nested(vec![symbol(
+            "PlayerUtils:GetPlayerMaid",
+            vec![],
+        )]));
+        assert_eq!(tree[0].name_path, "PlayerUtils/GetPlayerMaid");
+        assert_eq!(tree[0].name, "GetPlayerMaid");
+        assert_eq!(
+            tree[0].ancestors(),
+            vec!["PlayerUtils".to_string(), "GetPlayerMaid".to_string()]
+        );
+    }
+
+    #[test]
+    fn target_position_seeks_past_the_owner_table() {
+        let mut method = symbol("PlayerUtils:GetPlayerMaid", vec![]);
+        method.selection_range = Range {
+            start: Position {
+                line: 0,
+                character: 9,
+            },
+            end: Position {
+                line: 0,
+                character: 34,
+            },
+        };
+
+        let tree = build_tree(DocumentSymbolResponse::Nested(vec![method]));
+        let content = "function PlayerUtils:GetPlayerMaid(player)\nend\n";
+
+        assert_eq!(
+            tree[0].target_position(content),
+            Position {
+                line: 0,
+                character: 21
+            }
+        );
+    }
+
+    #[test]
+    fn target_position_ignores_the_disambiguation_suffix() {
+        let mut first = symbol("PlayerUtils:Init", vec![]);
+        first.selection_range = Range {
+            start: Position {
+                line: 0,
+                character: 9,
+            },
+            end: Position {
+                line: 0,
+                character: 25,
+            },
+        };
+        let second = first.clone();
+
+        let tree = build_tree(DocumentSymbolResponse::Nested(vec![first, second]));
+        assert_eq!(tree[0].name_path, "PlayerUtils/Init[0]");
+        assert_eq!(tree[1].name_path, "PlayerUtils/Init[1]");
+
+        let content = "function PlayerUtils:Init()\nend\n";
+        assert_eq!(
+            tree[0].target_position(content),
+            Position {
+                line: 0,
+                character: 21
+            }
         );
     }
 
