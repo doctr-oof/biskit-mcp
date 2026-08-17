@@ -1,0 +1,90 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.2.0, without leading v). Leave empty to bump the patch version."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    name: Open Release PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: resolve
+        shell: bash
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          VERSION="$REQUESTED"
+
+          if [ -z "$VERSION" ]; then
+            MAJOR=${CURRENT%%.*}
+            REST=${CURRENT#*.}
+            MINOR=${REST%%.*}
+            PATCH=${REST#*.}
+            PATCH=${PATCH%%-*}
+            VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version '$VERSION' (expected semver like 0.2.0 or 0.2.0-rc.1)"
+            exit 1
+          fi
+
+          if [ "$VERSION" = "$CURRENT" ]; then
+            echo "::error::Cargo.toml is already at version $VERSION"
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION already exists"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "branch=release/v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Preparing release v$VERSION (current: $CURRENT)"
+
+      - name: Bump manifest
+        shell: bash
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed -i "0,/^version = .*/s//version = \"$VERSION\"/" Cargo.toml
+          cargo update --workspace
+
+      - name: Push branch and open pull request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          BRANCH: ${{ steps.resolve.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release v$VERSION"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --base "$GITHUB_REF_NAME" \
+            --head "$BRANCH" \
+            --title "chore: release v$VERSION" \
+            --body "Bumps \`Cargo.toml\` to \`$VERSION\`. Merging this pull request tags \`v$VERSION\` and builds the draft release."
