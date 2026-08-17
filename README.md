@@ -6,18 +6,15 @@ Biskit gives AI coding agents two things for a Roblox Luau project: a durable, c
 that survives between sessions, and symbol-level code intelligence backed by a real Luau language
 server instead of text search.
 
-Biskit is read-only with respect to your source code. It never edits, creates, or deletes a source
-file. Agents keep using their own native editing tools. The only files Biskit writes are project
-memories and its own configuration.
+Biskit never edits, creates, or deletes a source file. Agents keep using their own native editing
+tools. The only files Biskit writes are project memories and its own configuration.
 
 ## Why this exists
 
-Biskit is inspired by [Serena](https://github.com/oraios/serena), but is scoped to a single
-language. Serena supports around ninety language servers, ships a web dashboard, a tray manager, and
-a JetBrains backend. If you only ever write Roblox Luau, nearly all of that is overhead.
-
-Biskit is a single native binary with no runtime dependency, seventeen tools, and no dashboard. It
-also supports Rojo sourcemaps, which Serena does not, so DataModel instance types actually resolve.
+Biskit is inspired by [Serena](https://github.com/oraios/serena), but scoped to a single language.
+Where Serena supports around ninety language servers and ships a dashboard, a tray manager, and a
+JetBrains backend, Biskit is a single native binary with no runtime dependency, seventeen tools, and
+Rojo sourcemap support, so DataModel instance types actually resolve.
 
 ## Install
 
@@ -37,14 +34,12 @@ On Windows use the PowerShell installer even if you normally work in Git Bash or
 terminal. The Windows build ships as a .zip and the install registers your user PATH, neither of
 which the shell installer does. WSL is the exception, since that is a real Linux target.
 
-Both installers verify the download against the SHA256SUMS published with the release and refuse to
-install on a mismatch.
+Both installers verify the download against the published SHA256SUMS and refuse to install on a
+mismatch.
 
-Once the binary is in place, both installers offer to register Biskit in a project for you. Every
-question defaults to the safe answer, nothing is written until you say yes, and the whole step is
-skipped when no terminal is attached, so piping the installer into a provisioning script never
-changes files behind your back. See [Per-project setup](#per-project-setup) for what it writes and
-how to run the same thing later.
+Both then offer to register Biskit in a project for you. Nothing is written until you confirm, and
+the step is skipped when no terminal is attached. See [Per-project setup](#per-project-setup) for
+what it writes and how to run the same thing later.
 
 To drive that step from a script, set `BISKIT_SETUP_CLIENTS` (any of `claude`, `cursor`, `vscode`)
 and optionally `BISKIT_SETUP_HOOKS=1` before running the installer, or set `BISKIT_NO_SETUP=1` to
@@ -60,12 +55,27 @@ claude mcp add biskit -- biskit-mcp start
 For Codex, add it to your MCP server configuration with the command `biskit-mcp` and the argument
 `start`.
 
+## Updating
+
+```sh
+biskit-mcp upgrade
+```
+
+That replaces the running executable with the latest release and nothing else. It never touches
+`.mcp.json`, `.claude/`, or `.biskit/`, so your existing project registrations keep working. Pass
+`--tag v0.1.4` to install a specific release, including an older one. The download is verified
+against SHA256SUMS and a mismatch aborts before anything is replaced.
+
+Windows cannot overwrite a running executable, so the current binary is renamed to
+`biskit-mcp.exe.old` before the new one takes its place. If an agent still has the server open, that
+file is cleaned up on the next upgrade instead. Restart any session that already had Biskit running
+to pick up the new build.
+
 ## Per-project setup
 
-`biskit-mcp start` takes no project argument by design. It walks up from the working directory the
-agent launched it in, looking for `.biskit/`, `.git/`, or `default.project.json`. One registration
-therefore follows you from project to project, and a registration checked into a repository gives
-every contributor the same server.
+`biskit-mcp start` takes no project argument. It walks up from the working directory it was launched
+in, looking for `.biskit/`, `.git/`, or `default.project.json`, so one registration follows you from
+project to project.
 
 If you want that registration in the repository rather than in your personal agent config, add
 `.mcp.json` at the project root. Claude Code reads it automatically:
@@ -83,11 +93,9 @@ If you want that registration in the repository rather than in your personal age
 ```
 
 Cursor uses the same shape at `.cursor/mcp.json`. VS Code uses `.vscode/mcp.json` with a top-level
-`servers` key instead of `mcpServers`. Agents that only support a global MCP config still behave
-per-project, because the root is discovered from the working directory rather than baked into the
-registration.
+`servers` key instead of `mcpServers`.
 
-`biskit-mcp setup` writes those files for you, from any project, at any time:
+`biskit-mcp setup` writes those files for you:
 
 ```sh
 biskit-mcp setup --client claude --client cursor --client vscode --hooks
@@ -97,11 +105,10 @@ With no `--client` it configures whichever agents the project already uses, judg
 `.cursor/`, and `.vscode/`. `--hooks` additionally installs the [session start
 hook](#session-start-hook). Add `--project-from-cwd` to pin the registration to that project instead
 of letting the server search upwards, `--dry-run` to see the plan without touching anything, and
-`--project <path>` to configure a directory you are not standing in.
+`--project <path>` to configure another directory.
 
-Merging is conservative. An existing `biskit` entry is never rewritten, unrelated keys and their
-order are preserved, a second run changes nothing, and a file that does not parse as JSON is left
-alone with an error rather than overwritten.
+Merging is idempotent. An existing `biskit` entry, unrelated keys, and key order are all preserved,
+and a file that does not parse as JSON is left alone with an error rather than overwritten.
 
 On Windows, `command` must resolve on `PATH`. The installer adds `%LOCALAPPDATA%\biskit\bin` to your
 user `PATH`, so restart the terminal, or the editor, after installing.
@@ -118,17 +125,14 @@ Precedence is `--project`, then `BISKIT_PROJECT`, then discovery. When nothing m
 with an error rather than guessing.
 
 A `.biskit/` folder wins over `.git/` and `default.project.json` no matter how far up the tree it
-sits, because it is the only marker that says the directory is deliberately a Biskit project. When
-no ancestor has one, the nearest `.git/` or `default.project.json` wins instead, so in a fresh
-monorepo a package holding its own `default.project.json` resolves to that package rather than to
-the repository root. Run `biskit-mcp doctor` to see which root was chosen and how.
+sits. When no ancestor has one, the nearest `.git/` or `default.project.json` wins instead. Run
+`biskit-mcp doctor` to see which root was chosen and how.
 
 ## First run
 
-`biskit-mcp start` does not create a `.biskit/` folder on its own. It runs on built-in defaults when
-a project has no folder yet, so a registration that follows you everywhere will not leave folders
-behind in repositories that do not use Biskit. The folder appears when something asks for it: either
-you run `biskit-mcp init`, or the agent saves its first memory.
+`biskit-mcp start` does not create a `.biskit/` folder on its own. It runs on built-in defaults
+until something asks for the folder: either you run `biskit-mcp init`, or the agent saves its first
+memory.
 
 Either way, you get:
 
@@ -203,9 +207,8 @@ Files and orientation:
 | `search_for_pattern` | Regex search over file contents |
 | `initial_instructions` | Usage manual plus the memory index |
 
-There is no `find_implementations`. luau-lsp reports `implementationProvider: false` and has no
-handler for `textDocument/implementation`, because Luau has no interface or implementation relation.
-Use `find_referencing_symbols` instead.
+There is no `find_implementations`, since Luau has no interface or implementation relation. Use
+`find_referencing_symbols` instead.
 
 ### Name paths
 
@@ -230,29 +233,24 @@ Symbols that share a name within one file are listed as `UserInfo[0]` and `UserI
 labels can be passed straight back in, which is the only way to address one of them with
 `find_declaration`, `find_referencing_symbols`, or `get_symbol_diagnostics`.
 
-`find_symbol` answers with `{ symbols, truncated }`, where `truncated` reports whether `max_matches`
-cut the result set short. The flag is omitted when nothing was cut, so an absent `truncated` means a
-complete result. `list_dir` and `search_for_pattern` report truncation the same way.
+Response shapes:
 
-`symbols` is keyed by file path, and the symbols under a key carry no path of their own, so a file
-that defines forty matches spells its path once rather than forty times. `find_declaration` answers
-with the same file-keyed shape. `get_symbols_overview` answers with a bare list, since the caller
-supplied the file.
-
-`list_dir` answers with `{ base, directories, files }`. `base` is the directory that was listed and
-every entry is named relative to it, so a deep directory spells its prefix once instead of once per
-entry. Join the two with `/` for a project-relative path. `find_file` and `search_for_pattern` still
-answer with full project-relative paths, because their results are not confined to one directory.
-
-A symbol at the top of a result carries its full name path. A symbol nested under `children` carries
-only its own leaf name, because the chain of parents above it already spells the ancestry out. Join
-them with `/` to address one: `update` under `PlayerService` is `PlayerService/update`.
+- `find_symbol` answers with `{ symbols, truncated }`, where `truncated` reports whether
+  `max_matches` cut the result set short and is omitted when nothing was cut. `list_dir` and
+  `search_for_pattern` report truncation the same way.
+- `find_symbol` and `find_declaration` key results by file path, and the symbols under a key carry
+  no path of their own. `get_symbols_overview` answers with a bare list.
+- `list_dir` answers with `{ base, directories, files }`, with every entry named relative to `base`.
+  Join the two with `/` for a project-relative path. `find_file` and `search_for_pattern` answer
+  with full project-relative paths.
+- A symbol at the top of a result carries its full name path. A symbol nested under `children`
+  carries only its own leaf name. Join them with `/` to address one: `update` under `PlayerService`
+  is `PlayerService/update`.
 
 `find_referencing_symbols` answers with `{ references, truncated }`, keyed by file the same way, and
-is capped by `tools.max_reference_matches` rather than by the listing cap, because a reference costs
-a snippet and a name path where a listing entry costs one path. It reports the reference line on its
-own; pass `context_lines` to widen the snippet either side of it, remembering that each extra line is
-paid once per reference.
+is capped by `tools.max_reference_matches` rather than by the listing cap. It reports the reference
+line on its own; pass `context_lines` to widen the snippet either side of it, at the cost of one
+extra line per reference.
 
 The language server's type signature for a symbol is omitted unless asked for. Pass
 `include_detail: true` to `get_symbols_overview`, `find_symbol`, or `find_declaration` when the
@@ -269,9 +267,9 @@ another with a `mem:` pointer in backticks, such as `` `mem:combat/hit-detection
 Biskit sets the MCP `instructions` field, which every compliant client surfaces. For Claude Code you
 can additionally inject the manual and memory index at session start.
 
-`biskit-mcp setup --hooks` writes this for you. It targets `.claude/settings.local.json`, which is
-personal and normally gitignored. Pass `--hooks-target shared` to put it in `.claude/settings.json`
-instead, where everyone who clones the repository picks it up. Either way the entry looks like this:
+`biskit-mcp setup --hooks` writes this to `.claude/settings.local.json`, which is personal and
+normally gitignored. Pass `--hooks-target shared` to put it in `.claude/settings.json` instead,
+where everyone who clones the repository picks it up. Either way the entry looks like this:
 
 ```json
 {
@@ -307,9 +305,8 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `tools.max_answer_chars` | `150000` | Ceiling on one tool result, 0 to lift it |
 | `tools.max_reference_matches` | `200` | Cap on references from `find_referencing_symbols` |
 
-A structured result over `max_answer_chars` is refused with a message naming what to narrow, since a
-JSON document cut in half cannot be read at all. A text result, such as a memory, is cut instead and
-says how much was withheld.
+A structured result over `max_answer_chars` is refused with a message naming what to narrow. A text
+result, such as a memory, is cut instead and says how much was withheld.
 
 ### Memory-only mode
 
@@ -319,11 +316,10 @@ intelligence at all:
 - luau-lsp is never downloaded and no language server process starts.
 - The seven code-intelligence tools are not registered, so the agent never sees them.
 - The MCP `instructions` field and `initial_instructions` both say the mode is on and name the tools
-  that are unavailable, so the agent does not waste turns reaching for them.
+  that are unavailable.
 - `biskit-mcp doctor` reports the mode and skips every LSP check.
 
-Memory, `list_dir`, `find_file`, and `search_for_pattern` keep working. This is what you want for a
-project that is not Luau, or on a machine that cannot reach the release asset. Put it in
+Memory, `list_dir`, `find_file`, and `search_for_pattern` keep working. Put it in
 `settings.local.yml` to turn it on for yourself only.
 
 ## Commands
@@ -334,18 +330,13 @@ project that is not Luau, or on a machine that cannot reach the release asset. P
 | `biskit-mcp init` | Create `.biskit/` without starting the server |
 | `biskit-mcp setup` | Register Biskit in the agent config files a project uses |
 | `biskit-mcp doctor` | Verify settings, acquisition, and sourcemap state |
+| `biskit-mcp upgrade` | Replace this executable with a published release |
 | `biskit-mcp hook session-start` | Emit SessionStart context for Claude Code |
 
-`start`, `doctor`, and `hook session-start` discover the project root by searching upwards, and each
-accepts `--project`, `--project-from-cwd`, or `BISKIT_PROJECT` to override that. `init` and `setup`
-do not search, because they mean "set up a project here", so they always use the working directory
-unless you pass `--project`. On `setup`, `--project-from-cwd` therefore means something different: it
-does not choose the directory being configured, it writes the flag into the registration that
-command generates.
-
-No command creates a `.biskit/` folder just by running. `init` creates it because that is its job,
-and `start` creates it the first time the agent saves a memory. Otherwise Biskit reads what is there
-and falls back to defaults.
+`start`, `doctor`, and `hook session-start` discover the project root by searching upwards. `init`
+and `setup` always use the working directory unless you pass `--project`. On `setup`,
+`--project-from-cwd` means something different: it does not choose the directory being configured,
+it writes that flag into the registration the command generates. `upgrade` has no project at all.
 
 Set `BISKIT_LOG` to control logging, for example `BISKIT_LOG=biskit=debug`. Logs always go to
 stderr, because stdout carries the JSON-RPC stream.
