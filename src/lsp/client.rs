@@ -20,6 +20,10 @@ type PendingMap =
 /// Reported to a waiting request when the read loop sees the server go away.
 pub const TERMINATED_CODE: i64 = -32000;
 
+/// JSON-RPC `MethodNotFound`, which a language server answers with when it does not implement a
+/// request at all.
+pub const METHOD_NOT_FOUND_CODE: i64 = -32601;
+
 #[derive(Debug, Clone)]
 pub struct ResponseError {
     pub code: i64,
@@ -67,6 +71,24 @@ pub fn is_unavailable(error: &anyhow::Error) -> bool {
         || error
             .downcast_ref::<ResponseError>()
             .is_some_and(|response| response.code == TERMINATED_CODE)
+}
+
+/// True when `error` means the server does not implement the request, as opposed to failing it.
+///
+/// A build that never answers a request is worth naming to the caller: no retry, no restart, and
+/// no rephrasing of the question will ever produce an answer from it.
+pub fn is_unsupported(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ResponseError>()
+        .is_some_and(|response| response.code == METHOD_NOT_FOUND_CODE)
+}
+
+/// The message the server sent with a failed request, where it failed rather than went away.
+pub fn declined_reason(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<ResponseError>()
+        .filter(|response| response.code != TERMINATED_CODE)
+        .map(|response| response.message.as_str())
 }
 
 fn unavailable(method: &str, detail: impl Into<String>) -> anyhow::Error {

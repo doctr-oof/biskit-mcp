@@ -11,7 +11,8 @@ use tokio::time::{Duration, Instant, sleep};
 use super::acquire::{self, LanguageServerInstall};
 use super::client::{LspConnection, ServerEvent};
 use super::protocol::{
-    Diagnostic, DocumentDiagnosticReport, DocumentSymbolResponse, GotoResponse, Location, Position,
+    Diagnostic, DocumentDiagnosticReport, DocumentSymbolResponse, GotoResponse, Hover, InlayHint,
+    Location, Position, Range, SignatureHelp, WorkspaceEdit,
 };
 use super::symbols::{SymbolNode, build_tree};
 use super::uri;
@@ -134,6 +135,7 @@ impl Session {
                 "workspace": {
                     "configuration": true,
                     "workspaceFolders": true,
+                    "workspaceEdit": {"documentChanges": true, "failureHandling": "abort"},
                     "didChangeConfiguration": {"dynamicRegistration": true},
                     "didChangeWatchedFiles": {"dynamicRegistration": true},
                     "symbol": {"dynamicRegistration": false},
@@ -149,7 +151,23 @@ impl Session {
                         "hierarchicalDocumentSymbolSupport": true,
                     },
                     "definition": {"dynamicRegistration": false, "linkSupport": true},
+                    "typeDefinition": {"dynamicRegistration": false, "linkSupport": true},
                     "references": {"dynamicRegistration": false},
+                    "hover": {
+                        "dynamicRegistration": false,
+                        "contentFormat": ["markdown", "plaintext"],
+                    },
+                    "inlayHint": {"dynamicRegistration": false},
+                    "signatureHelp": {
+                        "dynamicRegistration": false,
+                        "contextSupport": false,
+                        "signatureInformation": {
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "parameterInformation": {"labelOffsetSupport": true},
+                            "activeParameterSupport": true,
+                        },
+                    },
+                    "rename": {"dynamicRegistration": false, "prepareSupport": false},
                     "publishDiagnostics": {"relatedInformation": true},
                     "diagnostic": {
                         "dynamicRegistration": false,
@@ -290,6 +308,88 @@ impl Session {
         Ok(response
             .map(GotoResponse::into_locations)
             .unwrap_or_default())
+    }
+
+    pub async fn type_definition(&self, path: &Path, position: Position) -> Result<Vec<Location>> {
+        let file = self.ensure_open(path).await?;
+        let response: Option<GotoResponse> = self
+            .connection
+            .request(
+                "textDocument/typeDefinition",
+                json!({
+                    "textDocument": {"uri": file.uri},
+                    "position": position,
+                }),
+            )
+            .await?;
+        Ok(response
+            .map(GotoResponse::into_locations)
+            .unwrap_or_default())
+    }
+
+    pub async fn hover(&self, path: &Path, position: Position) -> Result<Option<Hover>> {
+        let file = self.ensure_open(path).await?;
+        self.connection
+            .request(
+                "textDocument/hover",
+                json!({
+                    "textDocument": {"uri": file.uri},
+                    "position": position,
+                }),
+            )
+            .await
+    }
+
+    pub async fn signature_help(
+        &self,
+        path: &Path,
+        position: Position,
+    ) -> Result<Option<SignatureHelp>> {
+        let file = self.ensure_open(path).await?;
+        self.connection
+            .request(
+                "textDocument/signatureHelp",
+                json!({
+                    "textDocument": {"uri": file.uri},
+                    "position": position,
+                }),
+            )
+            .await
+    }
+
+    pub async fn inlay_hints(&self, path: &Path, range: Range) -> Result<Vec<InlayHint>> {
+        let file = self.ensure_open(path).await?;
+        let response: Option<Vec<InlayHint>> = self
+            .connection
+            .request(
+                "textDocument/inlayHint",
+                json!({
+                    "textDocument": {"uri": file.uri},
+                    "range": range,
+                }),
+            )
+            .await?;
+        Ok(response.unwrap_or_default())
+    }
+
+    /// The edits a rename would make. Biskit never applies them: the workspace edit is the answer.
+    pub async fn rename(
+        &self,
+        path: &Path,
+        position: Position,
+        new_name: &str,
+    ) -> Result<Option<WorkspaceEdit>> {
+        let file = self.ensure_open(path).await?;
+        self.connection
+            .request(
+                "textDocument/rename",
+                json!({
+                    "textDocument": {"uri": file.uri},
+                    "position": position,
+                    "newName": new_name,
+                }),
+            )
+            .await
     }
 
     pub async fn references(
@@ -463,6 +563,26 @@ pub struct LanguageServerHandle {
     session: Mutex<Option<Arc<Session>>>,
 }
 
+/// Whether a language server is up, reported without waiting on one that is coming up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerState {
+    Disabled,
+    Running,
+    NotStarted,
+    Starting,
+}
+
+impl ServerState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Running => "running",
+            Self::NotStarted => "not started",
+            Self::Starting => "starting",
+        }
+    }
+}
+
 impl LanguageServerHandle {
     pub fn new(project: Project, settings: Settings) -> Self {
         Self {
@@ -519,6 +639,21 @@ impl LanguageServerHandle {
                 );
             }
         });
+    }
+
+    /// The state of the session without waiting for it.
+    ///
+    /// A status report that blocked behind a server which is mid-startup would be answering the
+    /// question it exists to answer only once the answer stopped being interesting.
+    pub fn state(&self) -> ServerState {
+        if self.settings.project.memory_only {
+            return ServerState::Disabled;
+        }
+        match self.session.try_lock() {
+            Ok(guard) if guard.is_some() => ServerState::Running,
+            Ok(_) => ServerState::NotStarted,
+            Err(_) => ServerState::Starting,
+        }
     }
 
     pub async fn restart(&self) -> Result<()> {

@@ -49,6 +49,18 @@ pub fn install_root(settings: &LspSettings) -> Result<PathBuf> {
         .join(&settings.version))
 }
 
+/// The language server binary already on disk, without acquiring one.
+///
+/// Reporting on an install must never trigger a download: a status call that spends thirty seconds
+/// fetching a release is answering a different question than the one it was asked.
+pub fn installed_binary(settings: &LspSettings) -> Option<PathBuf> {
+    if let Some(path) = &settings.binary_path {
+        return path.is_file().then(|| path.clone());
+    }
+    let binary = install_root(settings).ok()?.join(binary_file_name());
+    binary.is_file().then_some(binary)
+}
+
 pub fn ensure_installed(settings: &LspSettings) -> Result<LanguageServerInstall> {
     let root = install_root(settings)?;
     std::fs::create_dir_all(&root)?;

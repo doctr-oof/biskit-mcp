@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -110,6 +112,228 @@ pub struct DocumentDiagnosticReport {
     pub items: Vec<Diagnostic>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct MarkupContent {
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub value: String,
+}
+
+/// The deprecated `MarkedString` shape, which luau-lsp may still answer hover with.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum MarkedString {
+    Plain(String),
+    Fenced { value: String },
+}
+
+impl MarkedString {
+    fn into_value(self) -> String {
+        match self {
+            Self::Plain(text) => text,
+            Self::Fenced { value } => value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum HoverContents {
+    Markup(MarkupContent),
+    Many(Vec<MarkedString>),
+    One(MarkedString),
+}
+
+impl HoverContents {
+    /// The markdown of the hover, with the three shapes the specification allows flattened into
+    /// the one an agent can read.
+    pub fn into_markdown(self) -> String {
+        match self {
+            Self::Markup(content) => content.value,
+            Self::Many(parts) => parts
+                .into_iter()
+                .map(MarkedString::into_value)
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            Self::One(part) => part.into_value(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Hover {
+    pub contents: HoverContents,
+    #[serde(default)]
+    pub range: Option<Range>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InlayHintLabelPart {
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum InlayHintLabel {
+    Plain(String),
+    Parts(Vec<InlayHintLabelPart>),
+}
+
+impl InlayHintLabel {
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Plain(text) => text,
+            Self::Parts(parts) => parts.into_iter().map(|part| part.value).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlayHint {
+    pub position: Position,
+    pub label: InlayHintLabel,
+    #[serde(default)]
+    pub kind: Option<u32>,
+}
+
+/// LSP `InlayHintKind`. Anything else is reported without a kind rather than guessed at.
+pub fn inlay_hint_kind_label(kind: Option<u32>) -> Option<&'static str> {
+    match kind {
+        Some(1) => Some("type"),
+        Some(2) => Some("parameter"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Documentation {
+    Plain(String),
+    Markup(MarkupContent),
+}
+
+impl Documentation {
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Plain(text) => text,
+            Self::Markup(content) => content.value,
+        }
+    }
+}
+
+/// A parameter is named either by its own text or by a half-open offset pair into the signature
+/// label it belongs to.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ParameterLabel {
+    Text(String),
+    Offsets([u32; 2]),
+}
+
+impl ParameterLabel {
+    pub fn resolve(&self, signature: &str) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Offsets([start, end]) => signature
+                .chars()
+                .skip(*start as usize)
+                .take((*end).saturating_sub(*start) as usize)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterInformation {
+    pub label: ParameterLabel,
+    #[serde(default)]
+    pub documentation: Option<Documentation>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureInformation {
+    pub label: String,
+    #[serde(default)]
+    pub documentation: Option<Documentation>,
+    #[serde(default)]
+    pub parameters: Vec<ParameterInformation>,
+    #[serde(default)]
+    pub active_parameter: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureHelp {
+    #[serde(default)]
+    pub signatures: Vec<SignatureInformation>,
+    #[serde(default)]
+    pub active_signature: Option<u32>,
+    #[serde(default)]
+    pub active_parameter: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextEdit {
+    pub range: Range,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextDocumentIdentifier {
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextDocumentEdit {
+    pub text_document: TextDocumentIdentifier,
+    pub edits: Vec<TextEdit>,
+}
+
+/// `documentChanges` also carries create, rename, and delete file operations. A symbol rename does
+/// not produce them, and Biskit writes nothing either way, so anything that is not a text edit is
+/// kept as a value rather than being decoded.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum DocumentChange {
+    Edits(TextDocumentEdit),
+    FileOperation(Value),
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceEdit {
+    #[serde(default)]
+    pub changes: Option<BTreeMap<String, Vec<TextEdit>>>,
+    #[serde(default)]
+    pub document_changes: Option<Vec<DocumentChange>>,
+}
+
+impl WorkspaceEdit {
+    /// Edits keyed by the document URI they apply to.
+    ///
+    /// `documentChanges` wins where the server sent both, per the specification, and the file
+    /// operations it may also carry are dropped: they are not edits, and nothing here applies
+    /// them.
+    pub fn into_edits_by_uri(self) -> Vec<(String, Vec<TextEdit>)> {
+        if let Some(changes) = self.document_changes {
+            return changes
+                .into_iter()
+                .filter_map(|change| match change {
+                    DocumentChange::Edits(edit) => Some((edit.text_document.uri, edit.edits)),
+                    DocumentChange::FileOperation(_) => None,
+                })
+                .collect();
+        }
+        self.changes.map(Vec::from_iter).unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Error = 1,
@@ -192,6 +416,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(links.into_locations()[0].uri, "file:///a");
+    }
+
+    #[test]
+    fn hover_contents_flatten_to_one_markdown_block() {
+        let markup: Hover = serde_json::from_str(
+            r#"{"contents":{"kind":"markdown","value":"```luau\ntype X\n```"}}"#,
+        )
+        .unwrap();
+        assert_eq!(markup.contents.into_markdown(), "```luau\ntype X\n```");
+
+        let many: Hover =
+            serde_json::from_str(r#"{"contents":[{"language":"luau","value":"a"},"b"]}"#).unwrap();
+        assert_eq!(many.contents.into_markdown(), "a\n\nb");
+
+        let plain: Hover = serde_json::from_str(r#"{"contents":"number"}"#).unwrap();
+        assert_eq!(plain.contents.into_markdown(), "number");
+    }
+
+    #[test]
+    fn inlay_hint_labels_arrive_as_text_or_as_parts() {
+        let plain: InlayHint = serde_json::from_str(
+            r#"{"position":{"line":3,"character":9},"label":": number","kind":1}"#,
+        )
+        .unwrap();
+        assert_eq!(plain.label.into_text(), ": number");
+        assert_eq!(inlay_hint_kind_label(plain.kind), Some("type"));
+
+        let parts: InlayHint = serde_json::from_str(
+            r#"{"position":{"line":0,"character":0},"label":[{"value":"count"},{"value":": "}]}"#,
+        )
+        .unwrap();
+        assert_eq!(parts.label.into_text(), "count: ");
+        assert_eq!(inlay_hint_kind_label(parts.kind), None);
+    }
+
+    #[test]
+    fn a_parameter_named_by_offsets_is_cut_out_of_its_signature() {
+        let label: ParameterLabel = serde_json::from_str("[10, 24]").unwrap();
+        assert_eq!(
+            label.resolve("function (player: Player, amount: number)"),
+            "player: Player"
+        );
+
+        let text: ParameterLabel = serde_json::from_str(r#""amount: number""#).unwrap();
+        assert_eq!(text.resolve("ignored"), "amount: number");
+    }
+
+    #[test]
+    fn document_changes_win_over_changes_and_file_operations_are_dropped() {
+        let edit: WorkspaceEdit = serde_json::from_str(
+            r#"{
+                "changes": {"file:///ignored": [{"range": {"start":{"line":0,"character":0},"end":{"line":0,"character":1}}, "newText": "x"}]},
+                "documentChanges": [
+                    {"kind": "rename", "oldUri": "file:///a", "newUri": "file:///b"},
+                    {"textDocument": {"uri": "file:///kept", "version": 2},
+                     "edits": [{"range": {"start":{"line":4,"character":2},"end":{"line":4,"character":8}}, "newText": "renamed"}]}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let by_uri = edit.into_edits_by_uri();
+        assert_eq!(by_uri.len(), 1, "the file operation is not an edit");
+        assert_eq!(by_uri[0].0, "file:///kept");
+        assert_eq!(by_uri[0].1[0].new_text, "renamed");
+    }
+
+    #[test]
+    fn changes_are_read_when_the_server_sends_no_document_changes() {
+        let edit: WorkspaceEdit = serde_json::from_str(
+            r#"{"changes": {"file:///a": [{"range": {"start":{"line":1,"character":0},"end":{"line":1,"character":3}}, "newText": "new"}]}}"#,
+        )
+        .unwrap();
+
+        let by_uri = edit.into_edits_by_uri();
+        assert_eq!(by_uri.len(), 1);
+        assert_eq!(by_uri[0].0, "file:///a");
     }
 
     #[test]
