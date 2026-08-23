@@ -16,8 +16,9 @@ use crate::project::Project;
 const LUAU_EXTENSIONS: [&str; 3] = ["luau", "lua", "luaurc"];
 const MISSING_DIRECTORY_HINT: &str = "paths are relative to the project root; run list_dir on \".\" \
                                       or on the parent to see what is there";
-const REGEX_HINT: &str = "substring_pattern is a Rust regex matched with multi-line and \
-                          dot-matches-newline enabled; escape ( ) [ ] . * + ? | \\ to match them \
+const REGEX_HINT: &str = "substring_pattern is a Rust regex matched with multi-line enabled, so \
+                          ^ and $ bind to line ends and \".\" stops at them unless \
+                          dot_matches_newline is set; escape ( ) [ ] . * + ? | \\ to match them \
                           literally";
 
 pub struct FileTools {
@@ -44,12 +45,39 @@ pub struct PatternMatch {
     pub snippet: String,
 }
 
+/// What a search reports about the files it matched.
+///
+/// Only the field the requested mode fills is present, so a files-only search costs the caller a
+/// list of paths rather than a list of paths each carrying its own snippet.
 #[derive(Debug, Default, Serialize)]
 pub struct PatternSearchResult {
-    pub matches: BTreeMap<String, Vec<PatternMatch>>,
+    /// Snippet mode: the matching lines and their context, grouped by file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matches: Option<BTreeMap<String, Vec<PatternMatch>>>,
+    /// Files mode: every file holding at least one match, and nothing about the matches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
+    /// Counts mode: how many matches each file holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counts: Option<BTreeMap<String, usize>>,
+    /// Counts mode: the sum over every file reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_matches: Option<usize>,
     /// True when `max_pattern_matches` cut the result set short. Omitted when false.
     #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
+}
+
+/// How much a search reports about what it found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchMode {
+    /// The matching lines themselves, with any requested context.
+    #[default]
+    Snippets,
+    /// The paths of the files that match, one entry per file.
+    Files,
+    /// One match count per file, plus the total.
+    Counts,
 }
 
 #[derive(Debug, Clone)]
@@ -61,7 +89,14 @@ pub struct PatternSearchRequest<'a> {
     pub paths_include_glob: Option<&'a str>,
     pub paths_exclude_glob: Option<&'a str>,
     pub restrict_to_code_files: bool,
+    /// In snippet mode this caps snippets; in the other two it caps files reported, so the counts
+    /// a file reports stay true rather than being cut mid-file.
     pub max_matches: usize,
+    pub mode: SearchMode,
+    pub case_insensitive: bool,
+    /// Lets `.` cross a line boundary. Off by default: with it on, a plain `.*` runs to the end of
+    /// the file and returns the whole thing as one match.
+    pub dot_matches_newline: bool,
 }
 
 impl FileTools {
@@ -151,7 +186,8 @@ impl FileTools {
         }
         let regex = RegexBuilder::new(request.pattern)
             .multi_line(true)
-            .dot_matches_new_line(true)
+            .dot_matches_new_line(request.dot_matches_newline)
+            .case_insensitive(request.case_insensitive)
             .build()
             .map_err(|error| {
                 hinted(
@@ -164,6 +200,9 @@ impl FileTools {
         let exclude = request.paths_exclude_glob.map(compile_glob).transpose()?;
 
         let mut result = PatternSearchResult::default();
+        let mut snippets = BTreeMap::new();
+        let mut files = Vec::new();
+        let mut counts = BTreeMap::new();
         let mut total = 0usize;
 
         let targets: Vec<_> = if base.is_file() {
@@ -201,35 +240,64 @@ impl FileTools {
                 continue;
             };
 
-            // Most files hold no match at all, so the line structures the snippets need are built
-            // on the first hit rather than for every file that was merely read.
-            let mut index: Option<LineIndex> = None;
-            let mut relative: Option<String> = None;
-
-            for found in regex.find_iter(&contents) {
-                if total >= request.max_matches {
-                    result.truncated = true;
-                    break;
+            match request.mode {
+                // The whole point of files mode is not to look past the first hit: a file with
+                // four hundred matches costs exactly as much as a file with one.
+                SearchMode::Files => {
+                    if !regex.is_match(&contents) {
+                        continue;
+                    }
+                    if files.len() >= request.max_matches {
+                        result.truncated = true;
+                        break;
+                    }
+                    files.push(crate::project::normalize_separators(borrowed));
                 }
-                let index = index.get_or_insert_with(|| LineIndex::new(&contents));
-                let relative =
-                    relative.get_or_insert_with(|| crate::project::normalize_separators(borrowed));
+                // The cap counts files rather than matches here, so a reported count is the file's
+                // real count and not however many were left in the budget.
+                SearchMode::Counts => {
+                    let count = regex.find_iter(&contents).count();
+                    if count == 0 {
+                        continue;
+                    }
+                    if counts.len() >= request.max_matches {
+                        result.truncated = true;
+                        break;
+                    }
+                    total += count;
+                    counts.insert(crate::project::normalize_separators(borrowed), count);
+                }
+                SearchMode::Snippets => {
+                    // Most files hold no match at all, so the line structures the snippets need
+                    // are built on the first hit rather than for every file that was merely read.
+                    let mut index: Option<LineIndex> = None;
+                    let mut relative: Option<String> = None;
 
-                let start_line = index.line_of(found.start());
-                let end_line = index.line_of(found.end().saturating_sub(1));
-                let from = start_line.saturating_sub(request.context_lines_before);
-                let to = end_line + request.context_lines_after;
+                    for found in regex.find_iter(&contents) {
+                        if total >= request.max_matches {
+                            result.truncated = true;
+                            break;
+                        }
+                        let index = index.get_or_insert_with(|| LineIndex::new(&contents));
+                        let relative = relative
+                            .get_or_insert_with(|| crate::project::normalize_separators(borrowed));
 
-                result
-                    .matches
-                    .entry(relative.clone())
-                    .or_default()
-                    .push(PatternMatch {
-                        start_line: from + 1,
-                        end_line: index.clamp_line(to) + 1,
-                        snippet: index.text(from, to).into_owned(),
-                    });
-                total += 1;
+                        let start_line = index.line_of(found.start());
+                        let end_line = index.line_of(found.end().saturating_sub(1));
+                        let from = start_line.saturating_sub(request.context_lines_before);
+                        let to = end_line + request.context_lines_after;
+
+                        snippets
+                            .entry(relative.clone())
+                            .or_insert_with(Vec::new)
+                            .push(PatternMatch {
+                                start_line: from + 1,
+                                end_line: index.clamp_line(to) + 1,
+                                snippet: index.text(from, to).into_owned(),
+                            });
+                        total += 1;
+                    }
+                }
             }
 
             if result.truncated {
@@ -237,6 +305,14 @@ impl FileTools {
             }
         }
 
+        match request.mode {
+            SearchMode::Snippets => result.matches = Some(snippets),
+            SearchMode::Files => result.files = Some(files),
+            SearchMode::Counts => {
+                result.counts = Some(counts);
+                result.total_matches = Some(total);
+            }
+        }
         Ok(result)
     }
 
@@ -333,7 +409,15 @@ mod tests {
             paths_exclude_glob: None,
             restrict_to_code_files: false,
             max_matches: 200,
+            mode: SearchMode::Snippets,
+            case_insensitive: false,
+            dot_matches_newline: false,
         }
+    }
+
+    /// The snippet map of a search that ran in snippet mode.
+    fn snippets(result: &PatternSearchResult) -> &BTreeMap<String, Vec<PatternMatch>> {
+        result.matches.as_ref().expect("snippet mode fills matches")
     }
 
     #[test]
@@ -428,7 +512,7 @@ mod tests {
 
         let found = files.search_for_pattern(search("Marker")).unwrap();
         assert_eq!(
-            found.matches.keys().collect::<Vec<_>>(),
+            snippets(&found).keys().collect::<Vec<_>>(),
             vec!["src/Own.luau"]
         );
     }
@@ -464,7 +548,7 @@ mod tests {
         request.context_lines_after = 1;
         let found = files.search_for_pattern(request).unwrap();
 
-        let hit = &found.matches["Module.luau"][0];
+        let hit = &snippets(&found)["Module.luau"][0];
         assert_eq!((hit.start_line, hit.end_line), (1, 3));
         assert_eq!(hit.snippet, "local a = 1\nlocal Target = 2\nlocal c = 3");
         assert!(!found.truncated);
@@ -481,7 +565,7 @@ mod tests {
         request.context_lines_after = 5;
         let found = files.search_for_pattern(request).unwrap();
 
-        let hit = &found.matches["Module.luau"][0];
+        let hit = &snippets(&found)["Module.luau"][0];
         assert_eq!((hit.start_line, hit.end_line), (1, 1));
         assert_eq!(hit.snippet, "only Target here");
     }
@@ -501,7 +585,7 @@ mod tests {
         request.context_lines_after = 1;
         let found = files.search_for_pattern(request).unwrap();
 
-        let hit = &found.matches["Module.luau"][0];
+        let hit = &snippets(&found)["Module.luau"][0];
         assert_eq!(hit.snippet, "local a = 1\nlocal Target = 2\nlocal c = 3");
     }
 
@@ -516,7 +600,7 @@ mod tests {
         let found = files.search_for_pattern(request).unwrap();
 
         assert!(found.truncated);
-        assert_eq!(found.matches["Module.luau"].len(), 4);
+        assert_eq!(snippets(&found)["Module.luau"].len(), 4);
     }
 
     #[test]
@@ -525,7 +609,7 @@ mod tests {
         let found = files
             .search_for_pattern(search("NotPresentAnywhere"))
             .unwrap();
-        assert!(found.matches.is_empty());
+        assert!(snippets(&found).is_empty());
         assert!(!found.truncated);
     }
 
@@ -543,6 +627,7 @@ mod tests {
                 .search_for_pattern(request)
                 .unwrap()
                 .matches
+                .expect("snippet mode fills matches")
                 .into_keys()
                 .collect()
         };
@@ -558,5 +643,128 @@ mod tests {
         let mut included = search("Target");
         included.paths_include_glob = Some("src/**");
         assert_eq!(matched(included), ["src/Kept.luau", "src/Skipped.luau"]);
+    }
+
+    /// Two files, one of which spells the target on two separate lines, so a pattern that reaches
+    /// across lines behaves visibly differently from one that does not.
+    fn multiline_fixture() -> (tempfile::TempDir, FileTools) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("First.luau"),
+            "local Target = 1\nlocal other = 2\nlocal Target = 3\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("Second.luau"), "local TARGET = 4\n").unwrap();
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), Settings::default());
+        (dir, files)
+    }
+
+    #[test]
+    fn a_dot_star_stops_at_the_end_of_a_line_by_default() {
+        let (_dir, files) = multiline_fixture();
+
+        let found = files.search_for_pattern(search("Target.*")).unwrap();
+        let hits = &snippets(&found)["First.luau"];
+        assert_eq!(hits.len(), 2, "a per-line match per occurrence");
+        assert_eq!(hits[0].snippet, "local Target = 1");
+        assert_eq!(hits[1].snippet, "local Target = 3");
+    }
+
+    #[test]
+    fn dot_matches_newline_lets_one_match_swallow_the_file() {
+        let (_dir, files) = multiline_fixture();
+
+        let mut request = search("Target.*");
+        request.dot_matches_newline = true;
+        let found = files.search_for_pattern(request).unwrap();
+
+        let hits = &snippets(&found)["First.luau"];
+        assert_eq!(hits.len(), 1, "one match running to the end of the file");
+        assert_eq!((hits[0].start_line, hits[0].end_line), (1, 3));
+    }
+
+    #[test]
+    fn case_insensitive_matching_reaches_the_other_spelling() {
+        let (_dir, files) = multiline_fixture();
+
+        let sensitive = files.search_for_pattern(search("Target")).unwrap();
+        assert_eq!(
+            snippets(&sensitive).keys().collect::<Vec<_>>(),
+            vec!["First.luau"]
+        );
+
+        let mut request = search("Target");
+        request.case_insensitive = true;
+        let insensitive = files.search_for_pattern(request).unwrap();
+        assert_eq!(
+            snippets(&insensitive).keys().collect::<Vec<_>>(),
+            vec!["First.luau", "Second.luau"]
+        );
+    }
+
+    #[test]
+    fn files_mode_reports_paths_and_nothing_else() {
+        let (_dir, files) = multiline_fixture();
+
+        let mut request = search("Target");
+        request.mode = SearchMode::Files;
+        let found = files.search_for_pattern(request).unwrap();
+
+        assert_eq!(
+            found.files.as_deref(),
+            Some(["First.luau".to_string()].as_slice())
+        );
+        assert!(found.matches.is_none());
+        assert!(found.counts.is_none());
+        assert!(!found.truncated);
+    }
+
+    #[test]
+    fn counts_mode_reports_every_match_in_a_file_it_reports_at_all() {
+        let (_dir, files) = multiline_fixture();
+
+        let mut request = search("Target");
+        request.case_insensitive = true;
+        request.mode = SearchMode::Counts;
+        let found = files.search_for_pattern(request).unwrap();
+
+        let counts = found.counts.expect("counts mode fills counts");
+        assert_eq!(counts["First.luau"], 2);
+        assert_eq!(counts["Second.luau"], 1);
+        assert_eq!(found.total_matches, Some(3));
+        assert!(found.matches.is_none());
+    }
+
+    #[test]
+    fn the_cap_counts_files_rather_than_matches_outside_snippet_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..4 {
+            std::fs::write(
+                dir.path().join(format!("Module{index}.luau")),
+                "Target\n".repeat(5),
+            )
+            .unwrap();
+        }
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), Settings::default());
+
+        let mut listed = search("Target");
+        listed.mode = SearchMode::Files;
+        listed.max_matches = 2;
+        let found = files.search_for_pattern(listed).unwrap();
+        assert!(found.truncated);
+        assert_eq!(found.files.unwrap().len(), 2);
+
+        let mut counted = search("Target");
+        counted.mode = SearchMode::Counts;
+        counted.max_matches = 2;
+        let found = files.search_for_pattern(counted).unwrap();
+        assert!(found.truncated);
+        let counts = found.counts.unwrap();
+        assert_eq!(counts.len(), 2);
+        assert!(
+            counts.values().all(|count| *count == 5),
+            "a reported count is the file's real count: {counts:?}"
+        );
+        assert_eq!(found.total_matches, Some(10));
     }
 }

@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::config::Settings;
 use crate::errors;
-use crate::files::{FileTools, PatternSearchRequest};
+use crate::files::{FileTools, PatternSearchRequest, SearchMode};
 use crate::lsp::queries::{FindSymbolRequest, SymbolPoint, SymbolQuery, severity_from_input};
 use crate::lsp::session::LanguageServerHandle;
 use crate::memory::MemoryStore;
@@ -182,6 +182,36 @@ pub struct SearchForPatternRequest {
     /// Only search .luau, .lua, and .luaurc files.
     #[serde(default)]
     pub restrict_search_to_code_files: bool,
+    /// How much to report: "snippets" (the default) returns the matching lines, "files" returns
+    /// only the paths that match, "counts" returns a match count per file.
+    #[serde(default)]
+    pub mode: SearchOutputMode,
+    /// Match without regard to case.
+    #[serde(default)]
+    pub case_insensitive: bool,
+    /// Let "." match a newline, so one pattern can span lines. Off by default, because with it on
+    /// a plain ".*" runs to the end of the file and returns the whole file as one match.
+    #[serde(default)]
+    pub dot_matches_newline: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchOutputMode {
+    #[default]
+    Snippets,
+    Files,
+    Counts,
+}
+
+impl SearchOutputMode {
+    fn as_mode(self) -> SearchMode {
+        match self {
+            Self::Snippets => SearchMode::Snippets,
+            Self::Files => SearchMode::Files,
+            Self::Counts => SearchMode::Counts,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -655,7 +685,7 @@ impl Biskit {
     }
 
     #[tool(
-        description = "Searches file contents with a regular expression. Use this for text that is not a symbol; use find_symbol for definitions."
+        description = "Searches file contents with a regular expression. Use this for text that is not a symbol; use find_symbol for definitions. Set mode to \"files\" for just the paths that match or \"counts\" for a match count per file, both of which cost far less than snippets. \".\" stops at the end of a line unless dot_matches_newline is set."
     )]
     async fn search_for_pattern(
         &self,
@@ -673,6 +703,9 @@ impl Biskit {
                 paths_exclude_glob: request.paths_exclude_glob.as_deref(),
                 restrict_to_code_files: request.restrict_search_to_code_files,
                 max_matches: self.inner.settings.tools.max_pattern_matches,
+                mode: request.mode.as_mode(),
+                case_insensitive: request.case_insensitive,
+                dot_matches_newline: request.dot_matches_newline,
             })
             .map_err(fail("search_for_pattern"))?;
         self.ok("search_for_pattern", &result)

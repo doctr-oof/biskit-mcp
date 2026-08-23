@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use biskit_mcp::config::Settings;
-use biskit_mcp::files::{FileTools, PatternSearchRequest};
+use biskit_mcp::files::{FileTools, PatternSearchRequest, SearchMode};
 use biskit_mcp::lines::LineIndex;
 use biskit_mcp::lsp::name_path::NamePathPattern;
 use biskit_mcp::lsp::protocol::{DocumentSymbol, DocumentSymbolResponse, Position, Range};
@@ -123,9 +123,12 @@ fn bench_real_project(reporter: &mut Reporter) {
                 paths_exclude_glob: None,
                 restrict_to_code_files: true,
                 max_matches: 200,
+                mode: SearchMode::Snippets,
+                case_insensitive: false,
+                dot_matches_newline: false,
             })
             .unwrap();
-        black_box(found.matches.len());
+        black_box(found.matches.map(|matches| matches.len()));
     });
 }
 
@@ -493,20 +496,23 @@ fn bench_pattern_search(reporter: &mut Reporter, fixture: &Fixture) {
         paths_exclude_glob: None,
         restrict_to_code_files: true,
         max_matches: 200,
+        mode: SearchMode::Snippets,
+        case_insensitive: false,
+        dot_matches_newline: false,
     };
 
     reporter.case("D3 search, no match [after]", FIXTURE_FILES, || {
         let result = tools
             .search_for_pattern(request("ThisIdentifierIsNowhereInTheFixture"))
             .unwrap();
-        black_box(result.matches.len());
+        black_box(result.matches.map(|matches| matches.len()));
     });
 
     reporter.case("D3 search, many matches [after]", FIXTURE_FILES, || {
         let result = tools
             .search_for_pattern(request("function Service"))
             .unwrap();
-        black_box(result.matches.len());
+        black_box(result.matches.map(|matches| matches.len()));
     });
 }
 
