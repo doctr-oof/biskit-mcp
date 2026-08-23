@@ -53,24 +53,6 @@ const NO_SIGNATURES_NOTE: &str = "the language server answered with no signature
                                   line and column at an argument position rather than at the \
                                   function's declaration.";
 
-const RENAME_UNSUPPORTED_NOTE: &str = "this luau-lsp build does not implement textDocument/rename, \
-                                       so no edit plan exists. The references below are every use \
-                                       the server can see; they are not a rename plan, and a \
-                                       same-named symbol elsewhere is not among them.";
-
-const RENAME_EMPTY_NOTE: &str = "the language server produced no edits for this rename. The \
-                                 references below are every use it can see; they are not a rename \
-                                 plan.";
-
-const RENAME_DECLINED_NOTE: &str = "the language server declined the rename. The references below \
-                                    are every use it can see; they are not a rename plan.";
-
-/// Words that cannot be used as a Luau identifier.
-const LUAU_KEYWORDS: [&str; 21] = [
-    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local",
-    "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
-];
-
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolMatch {
     /// Absent when the location falls outside every symbol in its file.
@@ -247,34 +229,6 @@ pub struct ModuleApi {
     /// Why the surface is empty or partial, on the paths where it is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-}
-
-/// One replacement a rename would make. Positions are 1-based and the end is exclusive of the
-/// character it names, matching how the language server described the range.
-#[derive(Debug, Clone, Serialize)]
-pub struct RenameEdit {
-    pub line: u32,
-    pub column: u32,
-    pub end_line: u32,
-    pub end_column: u32,
-    pub old_text: String,
-    pub new_text: String,
-}
-
-/// A rename that was planned and never applied.
-#[derive(Debug, Clone, Serialize)]
-pub struct RenamePlan {
-    pub symbol: String,
-    pub new_name: String,
-    pub files: usize,
-    pub total_edits: usize,
-    pub edits: BTreeMap<String, Vec<RenameEdit>>,
-    /// Why there is no plan, on the paths where the server could not produce one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    /// The fallback answer that comes with `note`: every reference the server can see.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub references: Option<ReferencesByFile>,
 }
 
 /// Where a request points inside a file.
@@ -900,152 +854,6 @@ impl<'a> SymbolQuery<'a> {
         })
     }
 
-    /// Every edit a rename would make, without making any of them.
-    ///
-    /// Biskit writes no source, so the plan is the answer: the agent applies it with its own edit
-    /// tools and cannot miss a call site the way a grep-driven rename does.
-    pub async fn plan_rename(
-        &self,
-        name_path: &str,
-        relative_path: &str,
-        new_name: &str,
-        max_references: usize,
-    ) -> Result<RenamePlan> {
-        validate_identifier(new_name)?;
-
-        let session = self.handle.session().await?;
-        let (path, symbol, position) = self.locate_one(&session, name_path, relative_path).await?;
-
-        let workspace_edit = match session.rename(&path, position, new_name).await {
-            Ok(Some(edit)) => edit,
-            Ok(None) => {
-                return self
-                    .rename_fallback(
-                        &session,
-                        &symbol,
-                        new_name,
-                        &path,
-                        position,
-                        max_references,
-                        RENAME_EMPTY_NOTE.to_string(),
-                    )
-                    .await;
-            }
-            // A server that has gone away is not a decline: reporting references it can no longer
-            // produce would dress a dead session up as an answer.
-            Err(error) if client::is_unavailable(&error) => return Err(error),
-            Err(error) => {
-                let note = if client::is_unsupported(&error) {
-                    RENAME_UNSUPPORTED_NOTE.to_string()
-                } else {
-                    match client::declined_reason(&error) {
-                        Some(reason) => format!("{RENAME_DECLINED_NOTE} It said: {reason}"),
-                        None => RENAME_DECLINED_NOTE.to_string(),
-                    }
-                };
-                return self
-                    .rename_fallback(
-                        &session,
-                        &symbol,
-                        new_name,
-                        &path,
-                        position,
-                        max_references,
-                        note,
-                    )
-                    .await;
-            }
-        };
-
-        let mut edits: BTreeMap<String, Vec<RenameEdit>> = BTreeMap::new();
-        let mut total_edits = 0;
-
-        for (uri, text_edits) in workspace_edit.into_edits_by_uri() {
-            let Ok(target) = uri::to_path(&uri) else {
-                continue;
-            };
-            let Ok(relative) = self.project().relativize(&target) else {
-                continue;
-            };
-            let content = match session.ensure_open(&target).await {
-                Ok(file) => file.content,
-                Err(_) => Arc::from(""),
-            };
-            let lines = LineIndex::new(&content);
-
-            let bucket = edits.entry(relative).or_default();
-            for edit in text_edits {
-                bucket.push(RenameEdit {
-                    line: edit.range.start.line + 1,
-                    column: edit.range.start.character + 1,
-                    end_line: edit.range.end.line + 1,
-                    end_column: edit.range.end.character + 1,
-                    old_text: slice_range(&lines, edit.range),
-                    new_text: edit.new_text,
-                });
-                total_edits += 1;
-            }
-        }
-
-        if total_edits == 0 {
-            return self
-                .rename_fallback(
-                    &session,
-                    &symbol,
-                    new_name,
-                    &path,
-                    position,
-                    max_references,
-                    RENAME_EMPTY_NOTE.to_string(),
-                )
-                .await;
-        }
-
-        // Applying edits from the bottom of a file upwards keeps earlier positions valid, which is
-        // only possible if the caller is handed them in a known order.
-        for bucket in edits.values_mut() {
-            bucket.sort_by_key(|edit| (edit.line, edit.column));
-        }
-
-        Ok(RenamePlan {
-            symbol: symbol.name_path,
-            new_name: new_name.to_string(),
-            files: edits.len(),
-            total_edits,
-            edits,
-            note: None,
-            references: None,
-        })
-    }
-
-    /// What a rename plan degrades to when the server will not produce one.
-    #[allow(clippy::too_many_arguments)]
-    async fn rename_fallback(
-        &self,
-        session: &Session,
-        symbol: &SymbolNode,
-        new_name: &str,
-        path: &Path,
-        position: Position,
-        max_references: usize,
-        note: String,
-    ) -> Result<RenamePlan> {
-        let references = self
-            .references_at(session, path, position, max_references, 0)
-            .await
-            .unwrap_or_default();
-
-        Ok(RenamePlan {
-            symbol: symbol.name_path.clone(),
-            new_name: new_name.to_string(),
-            files: 0,
-            total_edits: 0,
-            edits: BTreeMap::new(),
-            note: Some(note),
-            references: Some(references.references),
-        })
-    }
-
     pub async fn find_declaration(
         &self,
         name_path: &str,
@@ -1487,54 +1295,6 @@ fn cap_documentation(text: String) -> String {
     let mut capped: String = text.chars().take(MAX_DOCUMENTATION_CHARS).collect();
     capped.push_str("\n\n[documentation truncated]");
     capped
-}
-
-/// Refuses a rename target that could not be a Luau name before the server is asked about it.
-fn validate_identifier(name: &str) -> Result<()> {
-    let mut characters = name.chars();
-    let head_ok = characters
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
-    let tail_ok = characters.all(|character| character.is_ascii_alphanumeric() || character == '_');
-
-    if !head_ok || !tail_ok {
-        bail_hint!(
-            "a Luau name starts with a letter or an underscore and carries only letters, digits, \
-             and underscores";
-            "new_name is not a valid Luau identifier: {name:?}"
-        );
-    }
-    if LUAU_KEYWORDS.contains(&name) {
-        bail_hint!("pick a name that is not reserved"; "new_name is a Luau keyword: {name}");
-    }
-    Ok(())
-}
-
-/// The text a range covers, so a planned edit says what it would replace.
-fn slice_range(lines: &LineIndex<'_>, range: Range) -> String {
-    let start_line = range.start.line as usize;
-    let end_line = range.end.line as usize;
-    let text = lines.text(start_line, end_line);
-    if text.is_empty() {
-        return String::new();
-    }
-
-    if start_line == end_line {
-        return text
-            .chars()
-            .skip(range.start.character as usize)
-            .take(range.end.character.saturating_sub(range.start.character) as usize)
-            .collect();
-    }
-
-    let mut spanned: Vec<String> = text.split('\n').map(str::to_string).collect();
-    if let Some(first) = spanned.first_mut() {
-        *first = first.chars().skip(range.start.character as usize).collect();
-    }
-    if let Some(last) = spanned.last_mut() {
-        *last = last.chars().take(range.end.character as usize).collect();
-    }
-    spanned.join("\n")
 }
 
 /// luau-lsp reports the declaration even when `includeDeclaration` is false, so drop it here.
@@ -2096,44 +1856,6 @@ mod tests {
 
         let short = "fits".to_string();
         assert_eq!(cap_documentation(short.clone()), short);
-    }
-
-    #[test]
-    fn a_rename_target_that_could_not_be_a_luau_name_is_refused() {
-        assert!(validate_identifier("updateAll").is_ok());
-        assert!(validate_identifier("_private2").is_ok());
-
-        for refused in ["", "2fast", "has space", "has-dash", "PlayerService:update"] {
-            assert!(
-                validate_identifier(refused).is_err(),
-                "accepted {refused:?}"
-            );
-        }
-        assert!(
-            validate_identifier("end").is_err(),
-            "a keyword is not a name"
-        );
-    }
-
-    #[test]
-    fn a_planned_edit_reports_the_text_it_would_replace() {
-        let content = "local PlayerService = {}\nfunction PlayerService:update()\nend\n";
-        let lines = LineIndex::new(content);
-
-        let single = Range {
-            start: position(1, 23),
-            end: position(1, 29),
-        };
-        assert_eq!(slice_range(&lines, single), "update");
-
-        let spanning = Range {
-            start: position(0, 6),
-            end: position(1, 8),
-        };
-        assert_eq!(
-            slice_range(&lines, spanning),
-            "PlayerService = {}\nfunction"
-        );
     }
 
     #[test]

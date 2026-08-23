@@ -12,9 +12,8 @@ These tools do **not** exist in this session. Do not attempt to call them:
 
 `get_symbols_overview`, `find_symbol`, `find_declaration`, `find_referencing_symbols`,
 `get_file_diagnostics`, `get_symbol_diagnostics`, `restart_language_server`, `explain_symbol`,
-`get_type_definition`, `get_inlay_hints`, `get_signature_help`, `plan_symbol_rename`,
-`resolve_instance_path`, `get_require_graph`, `get_module_context`, `get_module_api`,
-`query_roblox_api`
+`get_type_definition`, `get_inlay_hints`, `get_signature_help`, `resolve_instance_path`,
+`get_require_graph`, `get_module_context`, `get_module_api`, `query_roblox_api`
 
 So: no symbol lookup, no reference search, no type diagnostics from Biskit, and nothing about the
 Roblox DataModel or the Roblox API, because the sourcemap and the type definitions those answers are

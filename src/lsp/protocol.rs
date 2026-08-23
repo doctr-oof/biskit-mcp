@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -275,65 +273,6 @@ pub struct SignatureHelp {
     pub active_parameter: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TextEdit {
-    pub range: Range,
-    pub new_text: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TextDocumentIdentifier {
-    pub uri: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TextDocumentEdit {
-    pub text_document: TextDocumentIdentifier,
-    pub edits: Vec<TextEdit>,
-}
-
-/// `documentChanges` also carries create, rename, and delete file operations. A symbol rename does
-/// not produce them, and Biskit writes nothing either way, so anything that is not a text edit is
-/// kept as a value rather than being decoded.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum DocumentChange {
-    Edits(TextDocumentEdit),
-    FileOperation(Value),
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceEdit {
-    #[serde(default)]
-    pub changes: Option<BTreeMap<String, Vec<TextEdit>>>,
-    #[serde(default)]
-    pub document_changes: Option<Vec<DocumentChange>>,
-}
-
-impl WorkspaceEdit {
-    /// Edits keyed by the document URI they apply to.
-    ///
-    /// `documentChanges` wins where the server sent both, per the specification, and the file
-    /// operations it may also carry are dropped: they are not edits, and nothing here applies
-    /// them.
-    pub fn into_edits_by_uri(self) -> Vec<(String, Vec<TextEdit>)> {
-        if let Some(changes) = self.document_changes {
-            return changes
-                .into_iter()
-                .filter_map(|change| match change {
-                    DocumentChange::Edits(edit) => Some((edit.text_document.uri, edit.edits)),
-                    DocumentChange::FileOperation(_) => None,
-                })
-                .collect();
-        }
-        self.changes.map(Vec::from_iter).unwrap_or_default()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Error = 1,
@@ -461,38 +400,6 @@ mod tests {
 
         let text: ParameterLabel = serde_json::from_str(r#""amount: number""#).unwrap();
         assert_eq!(text.resolve("ignored"), "amount: number");
-    }
-
-    #[test]
-    fn document_changes_win_over_changes_and_file_operations_are_dropped() {
-        let edit: WorkspaceEdit = serde_json::from_str(
-            r#"{
-                "changes": {"file:///ignored": [{"range": {"start":{"line":0,"character":0},"end":{"line":0,"character":1}}, "newText": "x"}]},
-                "documentChanges": [
-                    {"kind": "rename", "oldUri": "file:///a", "newUri": "file:///b"},
-                    {"textDocument": {"uri": "file:///kept", "version": 2},
-                     "edits": [{"range": {"start":{"line":4,"character":2},"end":{"line":4,"character":8}}, "newText": "renamed"}]}
-                ]
-            }"#,
-        )
-        .unwrap();
-
-        let by_uri = edit.into_edits_by_uri();
-        assert_eq!(by_uri.len(), 1, "the file operation is not an edit");
-        assert_eq!(by_uri[0].0, "file:///kept");
-        assert_eq!(by_uri[0].1[0].new_text, "renamed");
-    }
-
-    #[test]
-    fn changes_are_read_when_the_server_sends_no_document_changes() {
-        let edit: WorkspaceEdit = serde_json::from_str(
-            r#"{"changes": {"file:///a": [{"range": {"start":{"line":1,"character":0},"end":{"line":1,"character":3}}, "newText": "new"}]}}"#,
-        )
-        .unwrap();
-
-        let by_uri = edit.into_edits_by_uri();
-        assert_eq!(by_uri.len(), 1);
-        assert_eq!(by_uri[0].0, "file:///a");
     }
 
     #[test]

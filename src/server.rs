@@ -363,17 +363,6 @@ pub struct InlayHintsRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct PlanSymbolRenameRequest {
-    /// Name path of the symbol to rename. Append "[n]" to a segment to pick one of several
-    /// same-named symbols.
-    pub name_path: String,
-    /// File containing the symbol, relative to the project root.
-    pub relative_path: String,
-    /// The new name. Must be a valid Luau identifier.
-    pub new_name: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ResolveInstancePathRequest {
     /// DataModel path such as "game.ReplicatedStorage.Shared.Combat". Omit to translate a file
     /// path instead.
@@ -447,7 +436,7 @@ pub struct NoArguments {}
 /// they read is downloaded and kept up to date for the language server's sake. In memory-only mode
 /// there is no sourcemap loaded and no type definition cache to answer from, so routing them would
 /// only offer an agent five tools that each fail the same way.
-const LANGUAGE_SERVER_TOOLS: [&str; 17] = [
+const LANGUAGE_SERVER_TOOLS: [&str; 16] = [
     "get_symbols_overview",
     "find_symbol",
     "find_declaration",
@@ -459,7 +448,6 @@ const LANGUAGE_SERVER_TOOLS: [&str; 17] = [
     "get_type_definition",
     "get_inlay_hints",
     "get_signature_help",
-    "plan_symbol_rename",
     "resolve_instance_path",
     "get_require_graph",
     "get_module_context",
@@ -933,28 +921,6 @@ impl Biskit {
                 .signature_help(point, &request.relative_path, request.include_documentation)
                 .await
                 .map_err(fail("get_signature_help"))?,
-        )
-    }
-
-    #[tool(
-        description = "Plans a symbol rename across the project and returns the edits without applying any of them. Apply them yourself with your own edit tools, working upwards from the last edit in each file. Use this instead of renaming by search and replace."
-    )]
-    async fn plan_symbol_rename(
-        &self,
-        Parameters(request): Parameters<PlanSymbolRenameRequest>,
-    ) -> ToolResult {
-        let query = SymbolQuery::new(&self.inner.language_server);
-        self.ok(
-            "plan_symbol_rename",
-            &query
-                .plan_rename(
-                    &request.name_path,
-                    &request.relative_path,
-                    &request.new_name,
-                    self.inner.settings.tools.max_reference_matches,
-                )
-                .await
-                .map_err(fail("plan_symbol_rename"))?,
         )
     }
 

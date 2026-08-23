@@ -83,14 +83,6 @@ pub fn is_unsupported(error: &anyhow::Error) -> bool {
         .is_some_and(|response| response.code == METHOD_NOT_FOUND_CODE)
 }
 
-/// The message the server sent with a failed request, where it failed rather than went away.
-pub fn declined_reason(error: &anyhow::Error) -> Option<&str> {
-    error
-        .downcast_ref::<ResponseError>()
-        .filter(|response| response.code != TERMINATED_CODE)
-        .map(|response| response.message.as_str())
-}
-
 fn unavailable(method: &str, detail: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(Unavailable {
         method: method.to_string(),

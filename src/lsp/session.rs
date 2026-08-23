@@ -13,7 +13,7 @@ use super::cache::{SourceStamp, SymbolCache};
 use super::client::{LspConnection, ServerEvent};
 use super::protocol::{
     Diagnostic, DocumentDiagnosticReport, DocumentSymbolResponse, GotoResponse, Hover, InlayHint,
-    Location, Position, Range, SignatureHelp, WorkspaceEdit,
+    Location, Position, Range, SignatureHelp,
 };
 use super::symbols::{SymbolNode, build_tree};
 use super::uri;
@@ -168,7 +168,6 @@ impl Session {
                             "activeParameterSupport": true,
                         },
                     },
-                    "rename": {"dynamicRegistration": false, "prepareSupport": false},
                     "publishDiagnostics": {"relatedInformation": true},
                     "diagnostic": {
                         "dynamicRegistration": false,
@@ -371,26 +370,6 @@ impl Session {
             )
             .await?;
         Ok(response.unwrap_or_default())
-    }
-
-    /// The edits a rename would make. Biskit never applies them: the workspace edit is the answer.
-    pub async fn rename(
-        &self,
-        path: &Path,
-        position: Position,
-        new_name: &str,
-    ) -> Result<Option<WorkspaceEdit>> {
-        let file = self.ensure_open(path).await?;
-        self.connection
-            .request(
-                "textDocument/rename",
-                json!({
-                    "textDocument": {"uri": file.uri},
-                    "position": position,
-                    "newName": new_name,
-                }),
-            )
-            .await
     }
 
     pub async fn references(
