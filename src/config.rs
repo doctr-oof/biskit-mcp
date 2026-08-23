@@ -251,6 +251,14 @@ impl LspSettings {
             Value::Bool(false),
         );
 
+        // luau-lsp turns every inlay hint off by default, which is right for an editor where they
+        // are visual clutter and wrong for get_inlay_hints, whose whole answer is the hints. The
+        // overrides below are inserted afterwards, so lsp.server_settings can still turn any of
+        // them back off.
+        for (key, value) in inlay_hint_defaults() {
+            dotted.insert(key.to_string(), value);
+        }
+
         if let Value::Object(overrides) = &self.server_settings {
             for (key, value) in overrides {
                 dotted.insert(key.clone(), value.clone());
@@ -259,6 +267,23 @@ impl LspSettings {
 
         expand_dotted_keys(&dotted)
     }
+}
+
+/// What `get_inlay_hints` needs turned on to have anything to report.
+fn inlay_hint_defaults() -> [(&'static str, Value); 5] {
+    [
+        (
+            "luau-lsp.inlayHints.parameterNames",
+            Value::String("all".to_string()),
+        ),
+        ("luau-lsp.inlayHints.parameterTypes", Value::Bool(true)),
+        ("luau-lsp.inlayHints.variableTypes", Value::Bool(true)),
+        ("luau-lsp.inlayHints.functionReturnTypes", Value::Bool(true)),
+        (
+            "luau-lsp.inlayHints.typeHintMaxLength",
+            Value::Number(50.into()),
+        ),
+    ]
 }
 
 /// Mirrors luau-lsp's `dottedToClientConfiguration`: split on `.`, drop the first segment.
@@ -410,6 +435,27 @@ mod tests {
         );
         assert_eq!(configuration["sourcemap"]["enabled"], true);
         assert_eq!(configuration["diagnostics"]["strictDatamodelTypes"], true);
+    }
+
+    #[test]
+    fn inlay_hints_are_on_by_default_and_still_overridable() {
+        let configuration = LspSettings::default().workspace_configuration();
+        assert_eq!(configuration["inlayHints"]["parameterNames"], "all");
+        assert_eq!(configuration["inlayHints"]["variableTypes"], true);
+        assert_eq!(configuration["inlayHints"]["typeHintMaxLength"], 50);
+
+        let overridden = LspSettings {
+            server_settings: serde_json::json!({
+                "luau-lsp.inlayHints.variableTypes": false
+            }),
+            ..LspSettings::default()
+        }
+        .workspace_configuration();
+        assert_eq!(overridden["inlayHints"]["variableTypes"], false);
+        assert_eq!(
+            overridden["inlayHints"]["parameterNames"], "all",
+            "one override does not clear the rest"
+        );
     }
 
     #[test]

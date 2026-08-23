@@ -68,9 +68,15 @@ lsp:
   # watch_sourcemap: true
 
   # Raw luau-lsp settings passed straight through, in VS Code dotted-key form.
-  # Anything valid in the luau-lsp VS Code extension works here.
+  # Anything valid in the luau-lsp VS Code extension works here, and anything set
+  # here wins over the defaults Biskit sends.
+  #
+  # Biskit turns the luau-lsp.inlayHints.* keys on by default, because luau-lsp
+  # ships them off and get_inlay_hints would then have nothing to report. Turn any
+  # of them back off here.
   # server_settings:
   #   luau-lsp.diagnostics.strictDatamodelTypes: true
+  #   luau-lsp.inlayHints.variableTypes: false
 
   # How long to wait for the language server to become ready, in milliseconds.
   # startup_timeout_ms: 60000
