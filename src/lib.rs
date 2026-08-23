@@ -7,6 +7,8 @@ pub mod lsp;
 pub mod memory;
 pub mod project;
 pub mod prompts;
+pub mod roblox;
 pub mod server;
 pub mod setup;
+pub mod status;
 pub mod upgrade;

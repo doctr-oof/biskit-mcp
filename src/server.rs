@@ -10,11 +10,15 @@ use serde::Serialize;
 use crate::config::Settings;
 use crate::errors;
 use crate::files::{FileTools, PatternSearchRequest};
-use crate::lsp::queries::{FindSymbolRequest, SymbolQuery, severity_from_input};
+use crate::lsp::queries::{FindSymbolRequest, SymbolPoint, SymbolQuery, severity_from_input};
 use crate::lsp::session::LanguageServerHandle;
 use crate::memory::MemoryStore;
 use crate::project::Project;
-use crate::prompts;
+use crate::roblox::RobloxIndex;
+use crate::roblox::api::ApiQuery;
+use crate::roblox::context;
+use crate::roblox::requires::{Direction, GraphRequest};
+use crate::{prompts, status};
 
 #[derive(Clone)]
 pub struct Biskit {
@@ -27,6 +31,10 @@ struct Inner {
     memories: MemoryStore,
     files: FileTools,
     language_server: Arc<LanguageServerHandle>,
+    /// Sourcemap, require graph, and Roblox API, each built once and reused.
+    roblox: Arc<RobloxIndex>,
+    /// How the project root was chosen, reported by `get_status`.
+    root_source: &'static str,
 }
 
 /// Tool failures travel back as `isError` results rather than JSON-RPC errors, so clients render
@@ -272,10 +280,144 @@ pub struct SymbolDiagnosticsRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExplainSymbolRequest {
+    /// Name path of the symbol. Omit to point with line and column instead.
+    #[serde(default)]
+    pub name_path: Option<String>,
+    /// File containing the position, relative to the project root.
+    pub relative_path: String,
+    /// 1-based line, used instead of name_path. Aim it at a use of the symbol.
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// 1-based column on that line. Defaults to 1.
+    #[serde(default)]
+    pub column: Option<u32>,
+    /// Include the doc comment alongside the type. Off by default because docs are long.
+    #[serde(default)]
+    pub include_documentation: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TypeDefinitionRequest {
+    /// Name path of a type. Omit to point with line and column instead, which is what a type
+    /// written as an annotation needs.
+    #[serde(default)]
+    pub name_path: Option<String>,
+    /// File containing the position, relative to the project root.
+    pub relative_path: String,
+    /// 1-based line. Aim it at the type's own name: in `local config: PlayerConfig`, at
+    /// `PlayerConfig` rather than at `config`.
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// 1-based column on that line. Defaults to 1.
+    #[serde(default)]
+    pub column: Option<u32>,
+    /// Include a source snippet around each result.
+    #[serde(default)]
+    pub include_body: bool,
+    /// Include each symbol's type signature. Off by default because signatures are long.
+    #[serde(default)]
+    pub include_detail: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InlayHintsRequest {
+    /// Luau source file relative to the project root.
+    pub relative_path: String,
+    /// First line to report on, 1-based. Defaults to the start of the file.
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    /// Last line to report on, 1-based. Defaults to the end of the file.
+    #[serde(default)]
+    pub end_line: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PlanSymbolRenameRequest {
+    /// Name path of the symbol to rename. Append "[n]" to a segment to pick one of several
+    /// same-named symbols.
+    pub name_path: String,
+    /// File containing the symbol, relative to the project root.
+    pub relative_path: String,
+    /// The new name. Must be a valid Luau identifier.
+    pub new_name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ResolveInstancePathRequest {
+    /// DataModel path such as "game.ReplicatedStorage.Shared.Combat". Omit to translate a file
+    /// path instead.
+    #[serde(default)]
+    pub instance_path: Option<String>,
+    /// Luau file relative to the project root, such as "src/Shared/Combat/init.luau". Omit to
+    /// translate an instance path instead.
+    #[serde(default)]
+    pub relative_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RequireGraphRequest {
+    /// Module to centre the graph on, relative to the project root. Omit for a project-wide
+    /// answer, which reports cycles and unresolved requires rather than every edge.
+    #[serde(default)]
+    pub relative_path: Option<String>,
+    /// "dependencies" for what it requires, "dependents" for what requires it, or "both".
+    #[serde(default)]
+    pub direction: Option<String>,
+    /// How many hops to follow. 1 is direct edges only.
+    #[serde(default = "default_graph_depth")]
+    pub depth: u32,
+    /// Report require cycles. On by default for a project-wide answer.
+    #[serde(default)]
+    pub include_cycles: Option<bool>,
+    /// Report requires that could not be resolved statically.
+    #[serde(default = "default_true")]
+    pub include_unresolved: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ModuleContextRequest {
+    /// Luau file relative to the project root.
+    pub relative_path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ModuleApiRequest {
+    /// ModuleScript relative to the project root.
+    pub relative_path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RobloxApiRequest {
+    /// A class ("BasePart"), a service ("TweenService"), a member ("TweenService:Create" or
+    /// "BasePart.Anchored"), or an enum ("Enum.EasingStyle").
+    pub query: String,
+    /// Keep only members whose name contains this, case-insensitively.
+    #[serde(default)]
+    pub member_filter: Option<String>,
+    /// Include members a class inherits from its ancestors. Off by default because Instance alone
+    /// carries dozens.
+    #[serde(default)]
+    pub include_inherited: bool,
+    /// Include the documentation prose. Off by default for a class listing; a single member
+    /// carries it regardless.
+    #[serde(default)]
+    pub include_documentation: bool,
+    /// Cap on members returned for a class or items for an enum.
+    #[serde(default = "default_max_members")]
+    pub max_members: usize,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NoArguments {}
 
 /// Tools backed by the language server. Memory-only mode drops these routes entirely.
-const LANGUAGE_SERVER_TOOLS: [&str; 7] = [
+///
+/// The Roblox tools are here despite three of them never speaking to luau-lsp, because everything
+/// they read is downloaded and kept up to date for the language server's sake. In memory-only mode
+/// there is no sourcemap loaded and no type definition cache to answer from, so routing them would
+/// only offer an agent five tools that each fail the same way.
+const LANGUAGE_SERVER_TOOLS: [&str; 17] = [
     "get_symbols_overview",
     "find_symbol",
     "find_declaration",
@@ -283,6 +425,16 @@ const LANGUAGE_SERVER_TOOLS: [&str; 7] = [
     "get_file_diagnostics",
     "get_symbol_diagnostics",
     "restart_language_server",
+    "explain_symbol",
+    "get_type_definition",
+    "get_inlay_hints",
+    "get_signature_help",
+    "plan_symbol_rename",
+    "resolve_instance_path",
+    "get_require_graph",
+    "get_module_context",
+    "get_module_api",
+    "query_roblox_api",
 ];
 
 fn project_root() -> String {
@@ -297,11 +449,24 @@ fn default_overview_depth() -> u32 {
     1
 }
 
+fn default_graph_depth() -> u32 {
+    1
+}
+
+fn default_max_members() -> usize {
+    200
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[tool_router]
 impl Biskit {
-    pub fn new(project: Project, settings: Settings) -> Self {
+    pub fn new(project: Project, settings: Settings, root_source: &'static str) -> Self {
         let memories = MemoryStore::new(project.clone());
         let files = FileTools::new(project.clone(), settings.clone());
+        let roblox = Arc::new(RobloxIndex::new(project.clone(), settings.clone()));
         let language_server = Arc::new(LanguageServerHandle::new(project, settings.clone()));
 
         let memory_only = settings.project.memory_only;
@@ -334,6 +499,8 @@ impl Biskit {
                 memories,
                 files,
                 language_server,
+                roblox,
+                root_source,
             }),
             tool_router,
         }
@@ -650,6 +817,266 @@ impl Biskit {
     }
 
     #[tool(
+        description = "Explains what a symbol resolves to: the type the language server inferred for it, not the type written in the source. Point at it with name_path or with line and column."
+    )]
+    async fn explain_symbol(
+        &self,
+        Parameters(request): Parameters<ExplainSymbolRequest>,
+    ) -> ToolResult {
+        let point = SymbolPoint::parse(request.name_path.as_deref(), request.line, request.column)
+            .map_err(fail("explain_symbol"))?;
+
+        let query = SymbolQuery::new(&self.inner.language_server);
+        self.ok(
+            "explain_symbol",
+            &query
+                .explain_symbol(point, &request.relative_path, request.include_documentation)
+                .await
+                .map_err(fail("explain_symbol"))?,
+        )
+    }
+
+    #[tool(
+        description = "Finds where a type is declared, which is usually an `export type` in another module. Point line and column at the type's own name in an annotation. Use find_declaration instead for where a value is declared."
+    )]
+    async fn get_type_definition(
+        &self,
+        Parameters(request): Parameters<TypeDefinitionRequest>,
+    ) -> ToolResult {
+        let point = SymbolPoint::parse(request.name_path.as_deref(), request.line, request.column)
+            .map_err(fail("get_type_definition"))?;
+
+        let query = SymbolQuery::new(&self.inner.language_server);
+        self.ok(
+            "get_type_definition",
+            &query
+                .type_definition(
+                    point,
+                    &request.relative_path,
+                    request.include_body,
+                    request.include_detail,
+                )
+                .await
+                .map_err(fail("get_type_definition"))?,
+        )
+    }
+
+    #[tool(
+        description = "Lists the inferred types the language server would draw inline over a line range. The cheapest way to see what a function's variables, arguments, and returns resolve to without reading its body."
+    )]
+    async fn get_inlay_hints(
+        &self,
+        Parameters(request): Parameters<InlayHintsRequest>,
+    ) -> ToolResult {
+        let query = SymbolQuery::new(&self.inner.language_server);
+        self.ok(
+            "get_inlay_hints",
+            &query
+                .inlay_hints(
+                    &request.relative_path,
+                    request.start_line,
+                    request.end_line,
+                    self.inner.settings.tools.max_listing_entries,
+                )
+                .await
+                .map_err(fail("get_inlay_hints"))?,
+        )
+    }
+
+    #[tool(
+        description = "Reports the parameters of a call without reading the callee. Aim line and column inside the parentheses of the call; the result names which argument that position is."
+    )]
+    async fn get_signature_help(
+        &self,
+        Parameters(request): Parameters<ExplainSymbolRequest>,
+    ) -> ToolResult {
+        let point = SymbolPoint::parse(request.name_path.as_deref(), request.line, request.column)
+            .map_err(fail("get_signature_help"))?;
+
+        let query = SymbolQuery::new(&self.inner.language_server);
+        self.ok(
+            "get_signature_help",
+            &query
+                .signature_help(point, &request.relative_path, request.include_documentation)
+                .await
+                .map_err(fail("get_signature_help"))?,
+        )
+    }
+
+    #[tool(
+        description = "Plans a symbol rename across the project and returns the edits without applying any of them. Apply them yourself with your own edit tools, working upwards from the last edit in each file. Use this instead of renaming by search and replace."
+    )]
+    async fn plan_symbol_rename(
+        &self,
+        Parameters(request): Parameters<PlanSymbolRenameRequest>,
+    ) -> ToolResult {
+        let query = SymbolQuery::new(&self.inner.language_server);
+        self.ok(
+            "plan_symbol_rename",
+            &query
+                .plan_rename(
+                    &request.name_path,
+                    &request.relative_path,
+                    &request.new_name,
+                    self.inner.settings.tools.max_reference_matches,
+                )
+                .await
+                .map_err(fail("plan_symbol_rename"))?,
+        )
+    }
+
+    #[tool(
+        description = "Translates between the Roblox DataModel and the files on disk, in either direction. Pass instance_path to find the file behind game.ReplicatedStorage.Shared.Combat, or relative_path to find where a file ends up in the game. Use this before assuming a file's instance path."
+    )]
+    async fn resolve_instance_path(
+        &self,
+        Parameters(request): Parameters<ResolveInstancePathRequest>,
+    ) -> ToolResult {
+        let sourcemap = self
+            .inner
+            .roblox
+            .sourcemap()
+            .await
+            .map_err(fail("resolve_instance_path"))?;
+        self.ok(
+            "resolve_instance_path",
+            &sourcemap
+                .resolve(
+                    request.instance_path.as_deref(),
+                    request.relative_path.as_deref(),
+                )
+                .map_err(fail("resolve_instance_path"))?,
+        )
+    }
+
+    #[tool(
+        description = "Reports which modules a module requires and which modules require it, resolved through the sourcemap rather than by text search. Omit relative_path for a project-wide answer naming every require cycle and every require that could not be resolved. Use this before editing a module, because find_referencing_symbols sees symbol uses and not module-level coupling."
+    )]
+    async fn get_require_graph(
+        &self,
+        Parameters(request): Parameters<RequireGraphRequest>,
+    ) -> ToolResult {
+        let directions =
+            Direction::parse(request.direction.as_deref()).map_err(fail("get_require_graph"))?;
+        let sourcemap = self
+            .inner
+            .roblox
+            .sourcemap()
+            .await
+            .map_err(fail("get_require_graph"))?;
+        let graph = self
+            .inner
+            .roblox
+            .require_graph()
+            .await
+            .map_err(fail("get_require_graph"))?;
+
+        self.ok(
+            "get_require_graph",
+            &graph
+                .answer(
+                    GraphRequest {
+                        relative_path: request.relative_path.as_deref(),
+                        directions,
+                        depth: request.depth,
+                        // A project-wide answer with no cycles in it would report almost nothing,
+                        // which is the one question it exists to answer.
+                        include_cycles: request
+                            .include_cycles
+                            .unwrap_or(request.relative_path.is_none()),
+                        include_unresolved: request.include_unresolved,
+                        limit: self.inner.settings.tools.max_listing_entries,
+                    },
+                    &sourcemap,
+                )
+                .map_err(fail("get_require_graph"))?,
+        )
+    }
+
+    #[tool(
+        description = "Orients you on one module in a single call: its instance path, whether it runs on the server, the client, or both, what it requires, what requires it, what its returned table exposes, and how many diagnostics it carries. Call this when you open a module you have not seen before, instead of four or five separate calls."
+    )]
+    async fn get_module_context(
+        &self,
+        Parameters(request): Parameters<ModuleContextRequest>,
+    ) -> ToolResult {
+        self.ok(
+            "get_module_context",
+            &context::module_context(
+                &self.inner.roblox,
+                &self.inner.language_server,
+                &request.relative_path,
+                self.inner.settings.tools.max_listing_entries,
+            )
+            .await
+            .map_err(fail("get_module_context"))?,
+        )
+    }
+
+    #[tool(
+        description = "Reports only what a ModuleScript hands back: the members of its returned table with their types, plus its exported types. None of the body. Use this instead of reading a module you only intend to call."
+    )]
+    async fn get_module_api(
+        &self,
+        Parameters(request): Parameters<ModuleApiRequest>,
+    ) -> ToolResult {
+        let query = SymbolQuery::new(&self.inner.language_server);
+        self.ok(
+            "get_module_api",
+            &query
+                .module_api(
+                    &request.relative_path,
+                    self.inner.settings.tools.max_listing_entries,
+                )
+                .await
+                .map_err(fail("get_module_api"))?,
+        )
+    }
+
+    #[tool(
+        description = "Looks up the real Roblox API from the type definitions Biskit already caches: the members of a class, the signature and documentation of one member, whether something is deprecated and what replaced it, or the items of an enum. Use this instead of recalling the Roblox API from memory."
+    )]
+    async fn query_roblox_api(
+        &self,
+        Parameters(request): Parameters<RobloxApiRequest>,
+    ) -> ToolResult {
+        let api = self
+            .inner
+            .roblox
+            .api()
+            .await
+            .map_err(fail("query_roblox_api"))?;
+        self.ok(
+            "query_roblox_api",
+            &api.answer(ApiQuery {
+                query: &request.query,
+                member_filter: request.member_filter.as_deref(),
+                include_inherited: request.include_inherited,
+                include_documentation: request.include_documentation,
+                max_members: request
+                    .max_members
+                    .min(self.inner.settings.tools.max_listing_entries),
+            })
+            .map_err(fail("query_roblox_api"))?,
+        )
+    }
+
+    #[tool(
+        description = "Reports what Biskit is working with: project root, language server state, sourcemap freshness, memory count, and settings that differ from the defaults. Call this when a tool returns nothing and you cannot tell whether that means no matches."
+    )]
+    async fn get_status(&self, Parameters(NoArguments {}): Parameters<NoArguments>) -> ToolResult {
+        let status = status::collect(
+            &self.inner.language_server,
+            &self.inner.settings,
+            &self.inner.memories,
+            self.inner.root_source,
+        )
+        .await
+        .map_err(fail("get_status"))?;
+        self.ok("get_status", &status)
+    }
+
+    #[tool(
         description = "Restarts the Luau language server. Use when symbol results look stale or empty for a file you know has symbols."
     )]
     async fn restart_language_server(
@@ -696,7 +1123,7 @@ mod tests {
             tools,
             ..Default::default()
         };
-        (dir, Biskit::new(project, settings))
+        (dir, Biskit::new(project, settings, "test"))
     }
 
     fn rendered(result: &CallToolResult) -> String {
@@ -774,5 +1201,48 @@ mod tests {
         ] {
             assert!(biskit.tool_router.has_route(name), "missing {name}");
         }
+    }
+
+    /// `get_status` exists to explain an empty answer, and "the language server is disabled" is
+    /// exactly such an answer, so it has to survive memory-only mode.
+    #[test]
+    fn get_status_is_routed_in_both_modes() {
+        for memory_only in [false, true] {
+            let (_dir, biskit) = open(memory_only);
+            assert!(
+                biskit.tool_router.has_route("get_status"),
+                "missing in memory_only={memory_only}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_status_report_names_the_root_and_the_mode() {
+        let (dir, biskit) = open(true);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let rendered = rendered(
+            &runtime
+                .block_on(biskit.get_status(Parameters(NoArguments {})))
+                .unwrap(),
+        );
+
+        let status: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(status["mode"], "memory-only");
+        assert_eq!(status["root_source"], "test");
+        assert_eq!(status["language_server"]["state"], "disabled");
+        assert_eq!(status["memories"]["count"], 0);
+        assert!(
+            status.get("sourcemap").is_none(),
+            "memory-only mode loads no sourcemap, so it has none to report on"
+        );
+        assert!(
+            status["project_root"]
+                .as_str()
+                .unwrap()
+                .ends_with(dir.path().file_name().unwrap().to_str().unwrap())
+        );
     }
 }

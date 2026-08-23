@@ -240,7 +240,7 @@ fn run_server(request: RootRequest) -> Result<()> {
         .build()?;
 
     runtime.block_on(async move {
-        let biskit = Biskit::new(project, settings);
+        let biskit = Biskit::new(project, settings, root_source);
         biskit.warm_up();
         let service = biskit.clone().serve(stdio()).await?;
         let outcome = service.waiting().await;
