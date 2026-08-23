@@ -197,9 +197,20 @@ These are all of the tools Biskit provides your agent. You can exclude them via 
 - **Memory**: `list_memories`, `read_memory`, `create_memory`, `edit_memory`, `rename_memory`,
   `delete_memory`.
 - **Code intelligence**: `get_symbols_overview`, `find_symbol`, `find_declaration`,
-  `find_referencing_symbols`, `get_file_diagnostics`, `get_symbol_diagnostics`,
-  `restart_language_server`.
-- **Files and orientation**: `list_dir`, `find_file`, `search_for_pattern`, `initial_instructions`.
+  `get_type_definition`, `find_referencing_symbols`, `get_file_diagnostics`,
+  `get_symbol_diagnostics`, `restart_language_server`.
+- **Types**: `explain_symbol` for the type the checker inferred rather than the one written down,
+  `get_inlay_hints` for those types over a line range, `get_signature_help` for the arguments of a
+  call.
+- **Refactoring**: `plan_symbol_rename` returns every edit a rename would make and applies none of
+  them, so your own edit tools do the writing and no call site is missed.
+- **Roblox**: `resolve_instance_path` translates between the DataModel and the files on disk in
+  either direction, `get_require_graph` reports what a module requires and what requires it plus
+  any require cycles, `query_roblox_api` answers questions about the real Roblox API from the type
+  definitions Biskit already caches, `get_module_api` returns only what a ModuleScript hands back,
+  and `get_module_context` composes all of it into one call for a module you have not seen before.
+- **Files and orientation**: `list_dir`, `find_file`, `search_for_pattern`, `initial_instructions`,
+  `get_status`.
 
 ### Memories
 
@@ -236,7 +247,7 @@ Set `project.memory_only: true` to run Biskit as a memory, file, and search serv
 intelligence at all:
 
 - luau-lsp is never downloaded and no language server process starts.
-- The seven code-intelligence tools are not registered, so the agent never sees them.
+- The code intelligence and Roblox tools are not registered, so the agent never sees them.
 - The MCP `instructions` field and `initial_instructions` both say the mode is on and name the tools
   that are unavailable.
 - `biskit-mcp doctor` reports the mode and skips every LSP check.

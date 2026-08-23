@@ -11,12 +11,16 @@ edits.
 These tools do **not** exist in this session. Do not attempt to call them:
 
 `get_symbols_overview`, `find_symbol`, `find_declaration`, `find_referencing_symbols`,
-`get_file_diagnostics`, `get_symbol_diagnostics`, `restart_language_server`
+`get_file_diagnostics`, `get_symbol_diagnostics`, `restart_language_server`, `explain_symbol`,
+`get_type_definition`, `get_inlay_hints`, `get_signature_help`, `plan_symbol_rename`,
+`resolve_instance_path`, `get_require_graph`, `get_module_context`, `get_module_api`,
+`query_roblox_api`
 
-So: no symbol lookup, no reference search, no type diagnostics from Biskit. Use own native tools for
-reading code, and own type checker or build for verifying edits. Mode set by
-`project.memory_only: true` in `.biskit/settings.yml`; only the human running the project should
-change it.
+So: no symbol lookup, no reference search, no type diagnostics from Biskit, and nothing about the
+Roblox DataModel or the Roblox API, because the sourcemap and the type definitions those answers are
+read from are loaded for the language server that is not running. Use own native tools for reading
+code, and own type checker or build for verifying edits. Mode set by `project.memory_only: true` in
+`.biskit/settings.yml`; only the human running the project should change it.
 
 ## Start of every session — mandatory, no exceptions
 
@@ -48,6 +52,7 @@ never before it. Reading the whole memory store is also wrong — select by name
 | See what is in a directory | `list_dir` |
 | Regex search across file contents | `search_for_pattern` |
 | Recall durable project knowledge | `list_memories` then `read_memory` |
+| Confirm which project Biskit is serving, and in which mode | `get_status` |
 
 `search_for_pattern` = the only content search Biskit offers here. Symbol-aware lookup unavailable,
 so a definition search is a regex search: match on `function Name`, `local Name =`, or the

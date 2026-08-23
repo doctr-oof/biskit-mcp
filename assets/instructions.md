@@ -29,12 +29,23 @@ Skipping this step is the most expensive mistake you can make here. Memories exi
 | Read one symbol's implementation | `find_symbol` with `include_body: true` |
 | Locate a symbol anywhere in the project | `find_symbol` |
 | Jump to where a symbol is defined | `find_declaration` |
+| Learn what a symbol's type actually resolves to | `explain_symbol` |
+| Jump to where a *type* is declared | `get_type_definition` |
+| See inferred types over a line range, cheaply | `get_inlay_hints` |
+| Learn the arguments of a call you are writing | `get_signature_help` |
 | Find every caller or user of a symbol | `find_referencing_symbols` |
+| Orient on a module you have not seen before | `get_module_context` |
+| See what a ModuleScript hands back, without its body | `get_module_api` |
+| Find what a module requires, or what requires it | `get_require_graph` |
+| Translate between a file and its place in the game | `resolve_instance_path` |
+| Check a real Roblox class, member, or enum | `query_roblox_api` |
+| Rename a symbol across the project | `plan_symbol_rename` |
 | Check whether a file type-checks | `get_file_diagnostics` |
 | Check a symbol and its callers for breakage after an edit | `get_symbol_diagnostics` |
 | Find files by name or glob | `find_file` |
 | See what is in a directory | `list_dir` |
 | Regex search across file contents | `search_for_pattern` |
+| Work out why a tool returned nothing | `get_status` |
 
 Prefer symbolic tools over whole files. Reading 900-line module for one function burn context rest of task need. `get_symbols_overview` then targeted `find_symbol` almost always cheaper.
 
@@ -74,6 +85,52 @@ Type signatures omitted by default. Pass `include_detail: true` to `get_symbols_
 
 Every tool result has size ceiling, `tools.max_answer_chars`. Structured result over ceiling refused outright with message naming what to narrow — half a JSON document unreadable. Text result, such as memory, cut instead and says how much withheld.
 
+## Types, not just locations
+
+`find_symbol` `detail` is declared shape. `explain_symbol` is what type checker actually inferred. Different answers whenever type not written out: `local part = workspace:FindFirstChild("Thing")` declares nothing, resolves to `Instance?`. Ask `explain_symbol` before you assume a type.
+
+Point at symbol two ways: `name_path` plus `relative_path`, or `line` plus `column`. Both 1-based, same numbers every Biskit result gives back. Use `line`/`column` for expression that is not symbol — call site, table field, diagnostic location. Pass one or other, never both.
+
+Returns `signature` always, `documentation` only with `include_documentation: true`. Docs verbose, so opt in when you need behavior, not when you need shape.
+
+`get_type_definition` different question from `find_declaration`. `find_declaration` = where this value declared. `get_type_definition` = where type declared, usually `export type` in shared module. Beats grepping `export type`.
+
+Aim it at type's own name, not at value: in `local config: PlayerConfig`, point `line`/`column` at `PlayerConfig`. Pointing at `config` returns nothing, because language server answers this from type name. Value with no written annotation has no type declaration to find — use `explain_symbol` there.
+
+`get_inlay_hints` = cheapest type view. Positions plus short labels over line range, no bodies. Forty-line function becomes dozen strings. Use before pulling body with `include_body`. Empty `hints` with `note` = no hints there, not failure.
+
+`get_signature_help` answers "what arguments does this take" without reading callee. Aim `line`/`column` inside parentheses of call. Aimed at declaration instead returns nothing, and says so in `note`.
+
+## Roblox, not just Luau
+
+This project is a game, not a folder of scripts. Where a file lands in the DataModel decides whether its code runs on server, client, or both, and no type checker will tell you when you got that wrong.
+
+`get_module_context` is the call to make when you open unfamiliar module. One call returns instance path, owning service, `role` (`server`, `client`, `shared`, `unknown`), direct requires, direct dependents, public surface, diagnostic counts. Replaces four to six separate calls. Start here, then narrow.
+
+`get_module_api` returns only what ModuleScript hands back: members of returned table with types, plus `export type` declarations. No body. Use before reading module you only intend to call. `return_kind` says what shape came back — `table`, `function`, `table_literal`, `expression`, `none`. `none` = Script or LocalScript, no public surface. `note` explains every case where surface is empty or partial.
+
+`get_require_graph` sees module-level coupling that `find_referencing_symbols` cannot: that tool sees symbol references, not requires. Pass `relative_path` for one module, `direction` (`dependencies`, `dependents`, `both`), `depth` for transitive hops. Omit `relative_path` for project-wide answer naming every require cycle.
+
+Requires resolved through sourcemap, so `script.Parent.Parent.Shared.X`, `game:GetService("ReplicatedStorage").Y`, `:WaitForChild("Z")`, and `@Alias/Module` all resolve. Requires that cannot be resolved statically — `require(modules[name])`, require through wrapper function — land in `unresolved` with reason. Read that list. Empty `dependencies` plus non-empty `unresolved` means module has real dependencies Biskit cannot see, not that it has none. Project using runtime module loader instead of `require` has empty graph and that is honest, not broken.
+
+`resolve_instance_path` goes both ways. Pass `instance_path` for file behind `game.ReplicatedStorage.Shared.Combat`; pass `relative_path` for where `src/Shared/Combat/init.luau` ends up in game. Never guess this translation. File that resolves to nothing is not synced by rojo project, so editing it changes nothing at runtime.
+
+Every DataModel answer carries `sourcemap` with mtime and age. Old sourcemap describes game that no longer exists. Check it before trusting instance path that surprises you.
+
+`query_roblox_api` is ground truth for Roblox API, read from same type definitions the checker uses. Do not recall Roblox API from memory — hallucinated method looks exactly like real one until it runs.
+
+Ask it for class (`BasePart`), member (`TweenService:Create`, `BasePart.Anchored`), or enum (`Enum.EasingStyle`). Member answer carries signature, parameter docs, return docs, deprecation plus replacement. Class answer lists own members only; pass `include_inherited: true` to walk ancestry, `member_filter` to narrow. Members hidden at current `lsp.roblox_security_level` are absent, and answer names the level it read.
+
+## Renaming a symbol
+
+`plan_symbol_rename` returns edits, applies none. Biskit never writes source; you apply plan with own edit tools.
+
+Result is `edits` keyed by file, each entry `line`, `column`, `end_line`, `end_column`, `old_text`, `new_text`, sorted by position. Apply each file's edits bottom upwards so earlier positions stay valid.
+
+Use this instead of search and replace. Grep rename hits same-named symbol in unrelated module and misses call site written differently; language server hits exactly binding you named.
+
+`note` plus `references` in result and empty `edits` means server produced no plan. Those references are every use it sees, not rename plan — verify each before touching it.
+
 ## After you edit code
 
 Biskit read source from disk each request, so edits visible immediately. After non-trivial edit, call `get_file_diagnostics` on changed file. If edit changed symbol signature or behavior, call `get_symbol_diagnostics` with `check_symbol_references: true` to catch breakage at call sites.
@@ -98,4 +155,8 @@ Diagnostics grouped file, then severity, then `symbols` keyed by name path. Diag
 
 ## When the language server misbehaves
 
-If symbol tools return empty results for file you know has symbols, or diagnostics look stale against file you just changed, call `restart_language_server`. Cheap. Do not restart reflexively for empty result that means only "no matches" — verify with `get_symbols_overview` first.
+Empty result has three causes and empty result shows none of them: project genuinely lacks symbol, sourcemap missing or stale, language server dead. Call `get_status` to tell them apart before you retry.
+
+`get_status` reports project root and how it was chosen, language server state, sourcemap freshness against newest Luau file, memory count, every setting that differs from default. `stale: true` on sourcemap means script added or moved since it was generated, so instance paths and DataModel types are wrong until it is regenerated.
+
+If symbol tools return empty results for file you know has symbols, or diagnostics look stale against file you just changed, call `restart_language_server`. Cheap. Do not restart reflexively for empty result that means only "no matches" — verify with `get_symbols_overview` or `get_status` first.
