@@ -28,6 +28,8 @@ pub struct Status {
     pub language_server: LanguageServerStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sourcemap: Option<SourcemapStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_require: Option<SharedRequireStatus>,
     pub memories: MemoryStatus,
 }
 
@@ -54,6 +56,22 @@ pub struct LanguageServerStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
     pub request_timeout_ms: u64,
+}
+
+/// Where the carpenter fork's `shared("Name")` require stands for this project.
+///
+/// The two halves can disagree, and neither one says so on its own: the language server resolves
+/// `shared()` with no switch to turn it off, while Biskit's require graph resolves it only when
+/// `project.shared_require` is on and only when the pinned server release is new enough for the two
+/// answers to describe the same project.
+#[derive(Debug, Clone, Serialize)]
+pub struct SharedRequireStatus {
+    /// Whether the require graph counts `shared("Name")` calls as dependency edges.
+    pub graph_edges: bool,
+    /// One of `supported`, `unsupported`, or `unknown`.
+    pub language_server: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +109,17 @@ const STALE_SOURCEMAP_NOTE: &str = "a Luau file is newer than the sourcemap, so 
                                     moved since then is invisible to the language server. \
                                     Regenerate the sourcemap.";
 
+const SHARED_REQUIRE_SKEW_NOTE: &str = "the require graph follows shared(\"Name\") calls but the \
+                                        pinned language server release predates support for them, \
+                                        so diagnostics will report as errors the same calls the \
+                                        graph reports as edges. Raise lsp.version.";
+
+const SHARED_REQUIRE_OFF_NOTE: &str = "project.shared_require is off, so the require graph does \
+                                       not count shared(\"Name\") calls as dependencies. The \
+                                       language server still resolves them, so hover, diagnostics \
+                                       and go-to-definition disagree with get_require_graph and \
+                                       get_module_context here.";
+
 pub async fn collect(
     handle: &LanguageServerHandle,
     settings: &Settings,
@@ -120,6 +149,10 @@ pub async fn collect(
         sourcemap: match memory_only {
             true => None,
             false => sourcemap_status(handle, settings).await,
+        },
+        shared_require: match memory_only {
+            true => None,
+            false => Some(shared_require_status(settings)),
         },
         memories: MemoryStatus {
             count: memories.list()?.len(),
@@ -185,6 +218,37 @@ fn collect_overrides(
     if current != defaults {
         out.insert(prefix.to_string(), current.clone());
     }
+}
+
+fn shared_require_status(settings: &Settings) -> SharedRequireStatus {
+    let graph_edges = settings.project.shared_require;
+    let language_server = match parsed_version(&settings.lsp.version) {
+        // A repository Biskit does not pin cannot be judged by its version number.
+        _ if settings.lsp.repository != crate::config::DEFAULT_LSP_REPOSITORY => "unknown",
+        Some(version) if version >= crate::config::FIRST_SHARED_REQUIRE_VERSION => "supported",
+        Some(_) => "unsupported",
+        None => "unknown",
+    };
+
+    let note = match (graph_edges, language_server) {
+        (true, "unsupported") => Some(SHARED_REQUIRE_SKEW_NOTE.to_string()),
+        (false, "supported") => Some(SHARED_REQUIRE_OFF_NOTE.to_string()),
+        _ => None,
+    };
+
+    SharedRequireStatus {
+        graph_edges,
+        language_server,
+        note,
+    }
+}
+
+/// `v0.2.0` and `0.2.0` alike, as the triple they compare by. Anything else is not judged.
+fn parsed_version(value: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = value.trim_start_matches('v').split('.');
+    let mut next = || parts.next()?.parse::<u32>().ok();
+    let parsed = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(parsed)
 }
 
 async fn sourcemap_status(
@@ -290,6 +354,77 @@ mod tests {
             serde_json::json!(["find_symbol"])
         );
         assert_eq!(overrides.len(), 2, "unexpected overrides: {overrides:?}");
+    }
+
+    #[test]
+    fn a_pinned_release_too_old_for_shared_require_is_called_out() {
+        let settings = Settings {
+            lsp: crate::config::LspSettings {
+                version: "v0.1.17".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let status = shared_require_status(&settings);
+        assert!(status.graph_edges);
+        assert_eq!(status.language_server, "unsupported");
+        assert!(status.note.is_some());
+    }
+
+    #[test]
+    fn the_default_pin_resolves_shared_require_and_needs_no_note() {
+        let status = shared_require_status(&Settings::default());
+        assert!(status.graph_edges);
+        assert_eq!(status.language_server, "supported");
+        assert!(status.note.is_none(), "unexpected note: {:?}", status.note);
+    }
+
+    #[test]
+    fn turning_the_graph_half_off_is_reported_as_the_disagreement_it_is() {
+        let settings = Settings {
+            project: crate::config::ProjectSettings {
+                shared_require: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let status = shared_require_status(&settings);
+        assert!(!status.graph_edges);
+        assert_eq!(status.language_server, "supported");
+        assert!(
+            status
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("still resolves them")),
+            "unexpected note: {:?}",
+            status.note
+        );
+    }
+
+    #[test]
+    fn a_version_or_repository_biskit_cannot_judge_is_not_guessed_at() {
+        let unparseable = Settings {
+            lsp: crate::config::LspSettings {
+                version: "nightly".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            shared_require_status(&unparseable).language_server,
+            "unknown"
+        );
+
+        let forked = Settings {
+            lsp: crate::config::LspSettings {
+                repository: "someone/their-own-fork".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(shared_require_status(&forked).language_server, "unknown");
     }
 
     #[test]

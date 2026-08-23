@@ -192,6 +192,13 @@ impl Sourcemap {
         }
     }
 
+    /// Builds a tree from sourcemap JSON, for tests that need one without a file on disk.
+    #[cfg(test)]
+    pub(crate) fn from_json_for_test(raw: &str, relative_path: &str) -> Self {
+        let root: RawNode = serde_json::from_str(raw).expect("the test sourcemap parses");
+        Self::index(root, relative_path.to_string(), None)
+    }
+
     pub fn reference(&self) -> SourcemapReference {
         let modified = self.stamp.map(|(modified, _)| modified);
         SourcemapReference {

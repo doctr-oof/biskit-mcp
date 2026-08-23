@@ -7,6 +7,7 @@ use anyhow::Result;
 use regex::Regex;
 use serde::Serialize;
 
+use super::shared_require::{self, Resolution, SharedIndex};
 use super::sourcemap::Sourcemap;
 use crate::config::Settings;
 use crate::lines::LineIndex;
@@ -436,7 +437,7 @@ pub fn build_or_reuse(
         return Ok(existing);
     }
     Ok(std::sync::Arc::new(build(
-        project, sourcemap, files, stamp,
+        project, settings, sourcemap, files, stamp,
     )?))
 }
 
@@ -483,6 +484,7 @@ fn stamp_of(files: &[PathBuf], sourcemap: &Sourcemap) -> GraphStamp {
 
 fn build(
     project: &Project,
+    settings: &Settings,
     sourcemap: &Sourcemap,
     files: Vec<PathBuf>,
     stamp: GraphStamp,
@@ -514,6 +516,17 @@ fn build(
 
     let mut aliases = AliasCache::new(project);
 
+    // The index is keyed by file stem across the whole project, so it has to exist before any call
+    // site is resolved. It is built from the same file list the modules were, which is what keeps
+    // it in step with what the graph can actually point at.
+    let shared = settings.project.shared_require.then(|| {
+        let paths: Vec<String> = modules
+            .iter()
+            .map(|module| module.relative_path.clone())
+            .collect();
+        SharedIndex::build(&paths, sourcemap)
+    });
+
     for (owner, (path, source)) in sources.iter().enumerate() {
         let blanked = blank_comments(source);
         let lines = LineIndex::new(&blanked);
@@ -523,16 +536,27 @@ fn build(
             .first()
             .copied();
 
-        for call in find_requires(&blanked, &lines) {
-            let resolution = resolve(
-                &call.expression,
-                &environment,
-                sourcemap,
-                script_node,
-                path,
-                project,
-                &mut aliases,
-            );
+        // A file that binds its own `shared` is not calling the global the framework installed.
+        let scan_shared =
+            shared.is_some() && !environment.contains_key(shared_require::GLOBAL_NAME);
+
+        for call in find_calls(&blanked, &lines, scan_shared) {
+            let resolution = match &call.kind {
+                CallKind::Require => resolve(
+                    &call.expression,
+                    &environment,
+                    sourcemap,
+                    script_node,
+                    path,
+                    project,
+                    &mut aliases,
+                ),
+                CallKind::Shared(name) => resolve_shared(
+                    name.as_deref(),
+                    shared.as_ref(),
+                    &modules[owner].relative_path,
+                ),
+            };
 
             match resolution {
                 Ok(Resolved::File(relative)) => match index.get(&relative) {
@@ -578,9 +602,34 @@ enum Resolved {
     File(String),
 }
 
+/// Which spelling of a require a call site used.
+enum CallKind {
+    Require,
+    /// The fork resolves `shared()` only when its argument is a constant string, so anything else
+    /// carries no name to look up and is reported unresolved rather than dropped.
+    Shared(Option<String>),
+}
+
 struct RequireCall {
     line: u32,
+    /// Byte offset of the call, so calls found by two passes can be reported in written order.
+    offset: usize,
     expression: String,
+    kind: CallKind,
+}
+
+/// Every require in a file, with the argument text as written.
+///
+/// `shared("Name")` is the Carpenter fork's string require and is a real dependency wherever the
+/// framework providing it is in play, so it is scanned alongside `require` unless the caller has
+/// turned it off.
+fn find_calls(blanked: &str, lines: &LineIndex<'_>, include_shared: bool) -> Vec<RequireCall> {
+    let mut found = find_requires(blanked, lines);
+    if include_shared {
+        found.extend(find_shared_requires(blanked, lines));
+        found.sort_by_key(|call| call.offset);
+    }
+    found
 }
 
 /// Every `require(...)` in a file, with the argument text as written.
@@ -632,10 +681,121 @@ fn find_requires(blanked: &str, lines: &LineIndex<'_>) -> Vec<RequireCall> {
         }
         found.push(RequireCall {
             line: lines.line_of(start) as u32 + 1,
+            offset: start,
             expression,
+            kind: CallKind::Require,
         });
     }
     found
+}
+
+/// Every `shared("Name")` in a file.
+///
+/// The fork matches an `AstExprCall` whose callee is the `shared` **global** and whose single
+/// argument is a string literal. This is a text pass rather than a parse, so the two conditions it
+/// can still check are enforced here: a qualified `Thing.shared(...)` is not the global, and neither
+/// is a `shared` the file has bound locally.
+fn find_shared_requires(blanked: &str, lines: &LineIndex<'_>) -> Vec<RequireCall> {
+    let bytes = blanked.as_bytes();
+    let name = shared_require::GLOBAL_NAME;
+    let mut found = Vec::new();
+    let finder = memchr::memmem::Finder::new(name.as_bytes());
+
+    let mut from = 0;
+    while let Some(offset) = finder.find(&bytes[from..]) {
+        let start = from + offset;
+        from = start + name.len();
+
+        if start > 0 {
+            let before = bytes[start - 1];
+            if is_word_byte(before) || before == b'.' || before == b':' {
+                continue;
+            }
+        }
+
+        let mut cursor = start + name.len();
+        if cursor < bytes.len() && is_word_byte(bytes[cursor]) {
+            continue;
+        }
+        while cursor < bytes.len() && (bytes[cursor] == b' ' || bytes[cursor] == b'\t') {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            continue;
+        }
+
+        let expression = match bytes[cursor] {
+            b'(' => match balanced(bytes, cursor) {
+                Some((inner, end)) => {
+                    from = end;
+                    blanked[inner].trim().to_string()
+                }
+                None => continue,
+            },
+            // `shared "Foo"` is a call without parentheses, and the fork matches it too.
+            b'"' | b'\'' => {
+                let rest = &blanked[cursor..];
+                let quote = bytes[cursor] as char;
+                match rest[1..].find(quote) {
+                    Some(end) => rest[..end + 2].to_string(),
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
+
+        if expression.is_empty() {
+            continue;
+        }
+        let module = string_literal(&expression);
+        found.push(RequireCall {
+            line: lines.line_of(start) as u32 + 1,
+            offset: start,
+            expression,
+            kind: CallKind::Shared(module),
+        });
+    }
+    found
+}
+
+/// The value of `expression` when it is one string literal and nothing else.
+///
+/// Anything else — a concatenation, a variable, a second argument — is what the fork declines to
+/// match, so it has to be distinguishable from a literal here rather than resolved on a guess.
+fn string_literal(expression: &str) -> Option<String> {
+    let chars: Vec<char> = expression.chars().collect();
+    let quote = *chars.first()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+
+    let mut value = String::new();
+    let mut index = 1;
+    while index < chars.len() {
+        match chars[index] {
+            character if character == quote => {
+                return chars[index + 1..]
+                    .iter()
+                    .all(|rest| rest.is_whitespace())
+                    .then_some(value);
+            }
+            '\\' => {
+                let escaped = *chars.get(index + 1)?;
+                value.push(match escaped {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    other => other,
+                });
+                index += 2;
+            }
+            character => {
+                value.push(character);
+                index += 1;
+            }
+        }
+    }
+    None
 }
 
 /// The span inside a balanced parenthesis pair, and the offset just past its close.
@@ -863,6 +1023,37 @@ fn read_string(chars: &[char], from: usize, quote: char) -> (String, usize) {
         }
     }
     (text, index)
+}
+
+/// Resolves a `shared("Name")` call the way the language server fork resolves it.
+///
+/// The reasons here are worded to match what the fork's own diagnostic says about the same line, so
+/// an agent reading both does not have to work out whether they are describing one problem or two.
+fn resolve_shared(
+    name: Option<&str>,
+    index: Option<&SharedIndex>,
+    requiring_relative_path: &str,
+) -> Result<Resolved, String> {
+    let Some(name) = name else {
+        return Err(
+            "a shared() call whose argument is not a string literal, which the language \
+                    server does not resolve either"
+                .to_string(),
+        );
+    };
+    let Some(index) = index else {
+        return Err("shared() resolution is off; set project.shared_require to true".to_string());
+    };
+
+    match index.resolve(name, requiring_relative_path) {
+        Resolution::Found(relative) => Ok(Resolved::File(relative)),
+        Resolution::NotFound => Err(format!("shared({name:?}) names no module in the project")),
+        Resolution::Ambiguous(candidates) => Err(format!(
+            "shared({name:?}) is ambiguous: it matches {}, and none of them is nearer than the \
+             rest",
+            candidates.join(", ")
+        )),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1229,7 +1420,7 @@ mod tests {
         let sourcemap = Sourcemap::load(&project, &settings).unwrap();
         let files = luau_files(&project, &settings).unwrap();
         let stamp = stamp_of(&files, &sourcemap);
-        let graph = build(&project, &sourcemap, files, stamp).unwrap();
+        let graph = build(&project, &settings, &sourcemap, files, stamp).unwrap();
         (dir, project, graph)
     }
 
@@ -1451,5 +1642,263 @@ mod tests {
     fn multiple_assignment_is_not_read_as_a_binding() {
         let bindings = local_bindings("local a, b = 1, 2\n");
         assert!(bindings.is_empty());
+    }
+
+    const SHARED_SOURCEMAP: &str = r#"{
+        "name": "Fixture",
+        "className": "DataModel",
+        "children": [
+            {
+                "name": "ReplicatedStorage",
+                "className": "ReplicatedStorage",
+                "children": [{
+                    "name": "Shared",
+                    "className": "Folder",
+                    "filePaths": ["src/Shared"],
+                    "children": [
+                        {"name": "Consumer", "className": "ModuleScript",
+                         "filePaths": ["src/Shared/Consumer.luau"]},
+                        {"name": "Config", "className": "ModuleScript",
+                         "filePaths": ["src/Shared/Config.luau"]}
+                    ]
+                }]
+            },
+            {
+                "name": "ServerScriptService",
+                "className": "ServerScriptService",
+                "children": [{
+                    "name": "Server",
+                    "className": "Folder",
+                    "filePaths": ["src/Server"],
+                    "children": [
+                        {"name": "Config", "className": "ModuleScript",
+                         "filePaths": ["src/Server/Config.luau"]}
+                    ]
+                }]
+            }
+        ]
+    }"#;
+
+    /// A project written the way a framework that installs `shared` as a require writes one.
+    fn shared_fixture(shared_require: bool) -> (tempfile::TempDir, RequireGraph) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/Shared")).unwrap();
+        std::fs::create_dir_all(root.join("src/Server")).unwrap();
+        std::fs::write(root.join("sourcemap.json"), SHARED_SOURCEMAP).unwrap();
+
+        std::fs::write(
+            root.join("src/Shared/Consumer.luau"),
+            "local Config = shared(\"Config\")\n\
+             local Server = shared(\"Server/Config\")\n\
+             local bare = shared \"Config\"\n\
+             local dynamic = shared(name)\n\
+             local joined = shared(\"Con\" .. \"fig\")\n\
+             local missing = shared(\"Nonexistent\")\n\
+             shared.someFlag = true\n\
+             local held = shared.cache\n\
+             return {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/Shared/Config.luau"), "return {}\n").unwrap();
+        std::fs::write(root.join("src/Server/Config.luau"), "return {}\n").unwrap();
+
+        let project = Project::open(root).unwrap();
+        let settings = Settings {
+            project: crate::config::ProjectSettings {
+                shared_require,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let sourcemap = Sourcemap::load(&project, &settings).unwrap();
+        let files = luau_files(&project, &settings).unwrap();
+        let stamp = stamp_of(&files, &sourcemap);
+        let graph = build(&project, &settings, &sourcemap, files, stamp).unwrap();
+        (dir, graph)
+    }
+
+    fn unresolved_reasons(graph: &RequireGraph, relative: &str) -> Vec<String> {
+        let index = graph.find(relative).expect("module is in the graph");
+        graph
+            .module(index)
+            .unresolved
+            .iter()
+            .map(|entry| entry.reason.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_shared_call_is_an_edge_like_any_other_require() {
+        let (_dir, graph) = shared_fixture(true);
+        assert_eq!(
+            dependency_paths(&graph, "src/Shared/Consumer.luau"),
+            vec![
+                "src/Server/Config.luau".to_string(),
+                "src/Shared/Config.luau".to_string(),
+            ]
+        );
+
+        let config = graph
+            .find("src/Shared/Config.luau")
+            .expect("the target is in the graph");
+        let (dependents, _) = graph.walk(config, Direction::Dependents, 1, 100);
+        assert_eq!(
+            dependents
+                .iter()
+                .map(|module| module.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/Shared/Consumer.luau"],
+            "the edge is readable backwards too"
+        );
+    }
+
+    /// The nearest sibling wins, so an unqualified name resolves within the requiring subtree.
+    #[test]
+    fn an_unqualified_shared_name_resolves_to_the_nearest_candidate() {
+        let (_dir, graph) = shared_fixture(true);
+        let consumer = graph.find("src/Shared/Consumer.luau").unwrap();
+        let edge = graph
+            .module(consumer)
+            .dependencies
+            .iter()
+            .find(|edge| edge.expression == "\"Config\"" && edge.line == 1)
+            .expect("the first shared call is an edge");
+        assert_eq!(
+            graph.module(edge.target).relative_path,
+            "src/Shared/Config.luau"
+        );
+    }
+
+    #[test]
+    fn a_shared_call_biskit_cannot_read_is_reported_rather_than_dropped() {
+        let (_dir, graph) = shared_fixture(true);
+        let reasons = unresolved_reasons(&graph, "src/Shared/Consumer.luau");
+
+        assert_eq!(
+            reasons
+                .iter()
+                .filter(|reason| reason.contains("not a string literal"))
+                .count(),
+            2,
+            "the variable and the concatenation are both reported: {reasons:?}"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("\"Nonexistent\"") && reason.contains("no module")),
+            "unexpected reasons: {reasons:?}"
+        );
+    }
+
+    /// `shared` is still a plain table, and the fork keeps it typed as one. Reading or writing a
+    /// field on it is not a require and must not surface as one.
+    #[test]
+    fn indexing_the_shared_table_is_not_a_require() {
+        let source = "shared.someFlag = true\nlocal held = shared.cache\nlocal n = shared[key]\n";
+        let blanked = blank_comments(source);
+        let lines = LineIndex::new(&blanked);
+        assert!(find_shared_requires(&blanked, &lines).is_empty());
+    }
+
+    /// `shared "Foo"` parses to the same call node as `shared("Foo")`, so the fork matches it.
+    #[test]
+    fn a_call_without_parentheses_is_still_a_shared_require() {
+        let (_dir, graph) = shared_fixture(true);
+        let consumer = graph.find("src/Shared/Consumer.luau").unwrap();
+        assert!(
+            graph
+                .module(consumer)
+                .dependencies
+                .iter()
+                .any(|edge| edge.line == 3),
+            "the paren-less call on line 3 is an edge: {:?}",
+            graph.module(consumer).dependencies
+        );
+    }
+
+    #[test]
+    fn turning_shared_require_off_leaves_the_calls_alone() {
+        let (_dir, graph) = shared_fixture(false);
+        assert!(
+            dependency_paths(&graph, "src/Shared/Consumer.luau").is_empty(),
+            "no shared call should become an edge"
+        );
+        assert!(
+            unresolved_reasons(&graph, "src/Shared/Consumer.luau").is_empty(),
+            "and none should be reported as a failure either"
+        );
+    }
+
+    #[test]
+    fn a_shared_the_file_bound_itself_is_not_the_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/Shared")).unwrap();
+        std::fs::write(root.join("sourcemap.json"), SHARED_SOURCEMAP).unwrap();
+        std::fs::write(
+            root.join("src/Shared/Consumer.luau"),
+            "local shared = require(script.Parent.Config)\nlocal x = shared(\"Config\")\nreturn {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/Shared/Config.luau"), "return {}\n").unwrap();
+
+        let project = Project::open(root).unwrap();
+        let settings = Settings::default();
+        let sourcemap = Sourcemap::load(&project, &settings).unwrap();
+        let files = luau_files(&project, &settings).unwrap();
+        let stamp = stamp_of(&files, &sourcemap);
+        let graph = build(&project, &settings, &sourcemap, files, stamp).unwrap();
+
+        assert_eq!(
+            dependency_paths(&graph, "src/Shared/Consumer.luau"),
+            vec!["src/Shared/Config.luau".to_string()],
+            "only the real require is an edge, and it is not counted twice"
+        );
+    }
+
+    #[test]
+    fn a_qualified_call_is_not_the_shared_global() {
+        let source = "local a = Framework.shared(\"Config\")\nlocal b = self:shared(\"Config\")\n";
+        let blanked = blank_comments(source);
+        let lines = LineIndex::new(&blanked);
+        assert!(find_shared_requires(&blanked, &lines).is_empty());
+    }
+
+    #[test]
+    fn a_commented_out_shared_call_is_not_a_dependency() {
+        let source = "-- shared(\"Old\")\nshared(\"New\")\n";
+        let blanked = blank_comments(source);
+        let lines = LineIndex::new(&blanked);
+        let found = find_shared_requires(&blanked, &lines);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].line, 2);
+    }
+
+    #[test]
+    fn calls_are_reported_in_the_order_they_are_written() {
+        let source = "require(script.A)\nshared(\"B\")\nrequire(script.C)\n";
+        let blanked = blank_comments(source);
+        let lines = LineIndex::new(&blanked);
+        let lines_found: Vec<u32> = find_calls(&blanked, &lines, true)
+            .iter()
+            .map(|call| call.line)
+            .collect();
+        assert_eq!(lines_found, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn only_a_lone_string_literal_carries_a_module_name() {
+        assert_eq!(string_literal("\"Foo\""), Some("Foo".to_string()));
+        assert_eq!(string_literal("'Foo'"), Some("Foo".to_string()));
+        assert_eq!(
+            string_literal("\"jobs\\\\Foo\""),
+            Some("jobs\\Foo".to_string())
+        );
+        assert_eq!(string_literal("\"Foo\"  "), Some("Foo".to_string()));
+
+        for expression in ["name", "\"a\" .. b", "\"a\", \"b\"", "\"unterminated", ""] {
+            assert_eq!(string_literal(expression), None, "{expression} parsed");
+        }
     }
 }

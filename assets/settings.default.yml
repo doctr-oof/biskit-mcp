@@ -93,6 +93,10 @@ project:
   # Gitignore syntax, one pattern per entry, for example "Packages/" or
   # "**/node_modules". A leading "!" is taken literally rather than as a
   # re-include, since every entry here names something to exclude.
+  #
+  # These are also handed to luau-lsp as its ignoreGlobs, so the language server
+  # and Biskit build the same view of the project. Set luau-lsp.ignoreGlobs under
+  # lsp.server_settings to override that and let the two differ.
   # ignored_paths: []
 
   # Honour .gitignore and .git/info/exclude when walking the project.
@@ -103,6 +107,18 @@ project:
   # to the agent. Memory, file, and search tools keep working. Useful for
   # non-Luau projects and for machines that cannot fetch the release asset.
   # memory_only: false
+
+  # Count the carpenter fork's shared("Name") string require as a dependency
+  # edge in get_require_graph and get_module_context. Sawhorse Roblox frameworks
+  # give the shared global a __call metamethod, which makes shared("Foo") a
+  # require of the module whose file is named Foo.luau.
+  #
+  # This governs Biskit's own scan only. The language server fork resolves
+  # shared() unconditionally and has no switch for it, so turning this off does
+  # not stop diagnostics, hover, or go to definition from following those calls.
+  # It only makes the require graph stop reporting them, which get_status will
+  # tell you about.
+  # shared_require: true
 
 tools:
   # Tool names to hide from the agent entirely.

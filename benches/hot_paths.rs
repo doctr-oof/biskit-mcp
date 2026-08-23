@@ -12,7 +12,7 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use biskit_mcp::config::Settings;
+use biskit_mcp::config::{ProjectSettings, Settings};
 use biskit_mcp::files::{FileTools, PatternSearchRequest, SearchMode};
 use biskit_mcp::lines::LineIndex;
 use biskit_mcp::lsp::name_path::NamePathPattern;
@@ -22,6 +22,8 @@ use biskit_mcp::lsp::session::LanguageServerHandle;
 use biskit_mcp::lsp::symbols::{SymbolNode, build_tree, disambiguate};
 use biskit_mcp::lsp::uri;
 use biskit_mcp::project::Project;
+use biskit_mcp::roblox::requires::build_or_reuse;
+use biskit_mcp::roblox::sourcemap::Sourcemap;
 
 /// Files in the generated fixture project. Large enough that the walk and the search are
 /// dominated by real work rather than by setup.
@@ -42,6 +44,7 @@ fn main() {
     bench_literal_prefilter(&mut reporter, &fixture);
     bench_project_walk(&mut reporter, &fixture);
     bench_pattern_search(&mut reporter, &fixture);
+    bench_shared_require_scan(&mut reporter);
     bench_real_project(&mut reporter);
 
     reporter.finish();
@@ -515,6 +518,99 @@ fn bench_pattern_search(reporter: &mut Reporter, fixture: &Fixture) {
         black_box(result.matches.map(|matches| matches.len()));
     });
 }
+
+// ---------------------------------------------------------------------------------------------
+// shared() require scan
+// ---------------------------------------------------------------------------------------------
+
+/// What turning `project.shared_require` on costs a whole-project graph build.
+///
+/// Not a before/after pair in the optimisation sense: both sides are the real code, and the only
+/// difference is the setting. The scan adds a second substring pass over every file plus a
+/// project-wide stem index, so the question is whether that is visible next to reading every file
+/// off disk in the first place.
+fn bench_shared_require_scan(reporter: &mut Reporter) {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".biskit")).unwrap();
+
+    let mut children = String::new();
+    for index in 0..SHARED_FIXTURE_FILES {
+        let module = root.join("src").join(format!("Package{}", index % 24));
+        std::fs::create_dir_all(&module).unwrap();
+        // Half the calls resolve, a quarter miss, a quarter carry no literal to look up.
+        std::fs::write(
+            module.join(format!("Module{index}.luau")),
+            format!(
+                "local A = shared(\"Module{}\")\n\
+                 local B = shared(\"Package{}/Module{}\")\n\
+                 local C = shared(\"Absent{index}\")\n\
+                 local D = shared(name)\n\
+                 local E = require(script.Parent.Sibling)\n\
+                 shared.flag = true\n{}",
+                (index + 1) % SHARED_FIXTURE_FILES,
+                (index + 2) % 24,
+                (index + 2) % SHARED_FIXTURE_FILES,
+                luau_source(SYMBOLS_PER_FILE)
+            ),
+        )
+        .unwrap();
+        children.push_str(&format!(
+            "{}{{\"name\": \"Module{index}\", \"className\": \"ModuleScript\", \
+             \"filePaths\": [\"src/Package{}/Module{index}.luau\"]}}",
+            if index == 0 { "" } else { "," },
+            index % 24
+        ));
+    }
+    std::fs::write(
+        root.join("sourcemap.json"),
+        format!(
+            "{{\"name\": \"Bench\", \"className\": \"DataModel\", \"children\": [{{\
+             \"name\": \"ReplicatedStorage\", \"className\": \"ReplicatedStorage\", \
+             \"children\": [{children}]}}]}}"
+        ),
+    )
+    .unwrap();
+
+    let project = Project::open(root).expect("fixture project");
+
+    let settings = |shared_require: bool| Settings {
+        project: ProjectSettings {
+            shared_require,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let off = settings(false);
+    let on = settings(true);
+    let sourcemap = Sourcemap::load(&project, &on).expect("fixture sourcemap");
+
+    let edges = build_or_reuse(None, &project, &on, &sourcemap)
+        .expect("graph builds")
+        .len();
+    reporter.note(format!(
+        "shared() scan over {SHARED_FIXTURE_FILES} modules, {edges} in the graph"
+    ));
+
+    reporter.case("S1 graph build, shared off", SHARED_FIXTURE_FILES, || {
+        black_box(
+            build_or_reuse(None, &project, &off, &sourcemap)
+                .unwrap()
+                .len(),
+        );
+    });
+
+    reporter.case("S1 graph build, shared on", SHARED_FIXTURE_FILES, || {
+        black_box(
+            build_or_reuse(None, &project, &on, &sourcemap)
+                .unwrap()
+                .len(),
+        );
+    });
+}
+
+const SHARED_FIXTURE_FILES: usize = 600;
 
 // ---------------------------------------------------------------------------------------------
 // Fixture

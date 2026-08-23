@@ -1,6 +1,7 @@
 pub mod api;
 pub mod context;
 pub mod requires;
+pub mod shared_require;
 pub mod sourcemap;
 
 use std::sync::{Arc, Mutex};

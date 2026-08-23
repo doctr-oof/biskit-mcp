@@ -72,7 +72,7 @@ impl Session {
             .context("language server acquisition panicked")??;
 
         let (events, receiver) = mpsc::unbounded_channel();
-        let configuration = settings.lsp.workspace_configuration();
+        let configuration = settings.lsp.workspace_configuration(&settings.project);
         let request_timeout = Duration::from_millis(settings.lsp.request_timeout_ms);
 
         let connection = LspConnection::spawn(

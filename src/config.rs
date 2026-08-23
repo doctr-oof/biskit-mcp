@@ -7,10 +7,18 @@ use serde_json::{Map, Value};
 
 pub const DEFAULT_LSP_VERSION: &str = "v0.2.0";
 pub const DEFAULT_LSP_REPOSITORY: &str = "Sawhorse-Interactive/luau-lsp-carpenter";
+
 pub const DEFAULT_TYPE_DEFINITIONS_URL: &str =
     "https://luau-lsp.pages.dev/type-definitions/globalTypes.{security_level}.d.luau";
 pub const DEFAULT_ROBLOX_DOCS_URL: &str = "https://luau-lsp.pages.dev/api-docs/en-us.json";
 pub const DEFAULT_STANDARD_DOCS_URL: &str = "https://luau-lsp.pages.dev/api-docs/luau-en-us.json";
+
+/// The first carpenter release whose language server resolves `shared("Name")`.
+///
+/// Pinning `lsp.version` below this leaves Biskit's require graph following `shared()` calls the
+/// language server reports as errors, which is worth telling the caller about rather than letting
+/// them discover as two tools disagreeing.
+pub const FIRST_SHARED_REQUIRE_VERSION: (u32, u32, u32) = (0, 2, 0);
 
 /// The carpenter fork publishes no checksums; these are the digests pinned for `v0.2.0`.
 const PINNED_CHECKSUMS: [(&str, &str); 4] = [
@@ -139,6 +147,13 @@ pub struct ProjectSettings {
     pub respect_gitignore: bool,
     /// Runs without the Luau language server: no acquisition, no process, no LSP-backed tools.
     pub memory_only: bool,
+    /// Counts the carpenter fork's `shared("Name")` string require as a dependency edge.
+    ///
+    /// This governs Biskit's own require-graph scan only. The language server fork resolves
+    /// `shared()` unconditionally and has no switch for it, so turning this off does not stop
+    /// diagnostics, hover, or go-to-definition from following those calls; it only makes the
+    /// require graph stop reporting them.
+    pub shared_require: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +203,7 @@ impl Default for ProjectSettings {
             ignored_paths: Vec::new(),
             respect_gitignore: true,
             memory_only: false,
+            shared_require: true,
         }
     }
 }
@@ -234,12 +250,32 @@ impl LspSettings {
     }
 
     /// luau-lsp expects VS Code style dotted keys; the first segment is discarded by its parser.
-    pub fn workspace_configuration(&self) -> Value {
+    ///
+    /// `project` is passed in so the two file sets can be made to agree. luau-lsp builds its own
+    /// view of the project — the `shared()` require index above all — by walking the workspace and
+    /// filtering on `ignoreGlobs`, where Biskit walks it filtering on `project.ignored_paths`. Left
+    /// apart, the same `shared("Foo")` can resolve one way in the require graph and another in the
+    /// diagnostics. Both take gitignore syntax matched against the workspace-relative path, so the
+    /// patterns carry across unchanged.
+    pub fn workspace_configuration(&self, project: &ProjectSettings) -> Value {
         let mut dotted = Map::new();
         dotted.insert(
             "luau-lsp.platform.type".to_string(),
             Value::String(self.platform.as_str().to_string()),
         );
+
+        if !project.ignored_paths.is_empty() {
+            dotted.insert(
+                "luau-lsp.ignoreGlobs".to_string(),
+                Value::Array(
+                    project
+                        .ignored_paths
+                        .iter()
+                        .map(|pattern| Value::String(pattern.clone()))
+                        .collect(),
+                ),
+            );
+        }
 
         let sourcemap_enabled = self.platform == LuauPlatform::Roblox && self.sourcemap.is_some();
         dotted.insert(
@@ -433,7 +469,7 @@ mod tests {
             ..LspSettings::default()
         };
 
-        let configuration = settings.workspace_configuration();
+        let configuration = settings.workspace_configuration(&ProjectSettings::default());
         assert_eq!(configuration["platform"]["type"], "roblox");
         assert_eq!(
             configuration["sourcemap"]["sourcemapFile"],
@@ -445,7 +481,8 @@ mod tests {
 
     #[test]
     fn inlay_hints_are_on_by_default_and_still_overridable() {
-        let configuration = LspSettings::default().workspace_configuration();
+        let configuration =
+            LspSettings::default().workspace_configuration(&ProjectSettings::default());
         assert_eq!(configuration["inlayHints"]["parameterNames"], "all");
         assert_eq!(configuration["inlayHints"]["variableTypes"], true);
         assert_eq!(configuration["inlayHints"]["typeHintMaxLength"], 50);
@@ -456,11 +493,56 @@ mod tests {
             }),
             ..LspSettings::default()
         }
-        .workspace_configuration();
+        .workspace_configuration(&ProjectSettings::default());
         assert_eq!(overridden["inlayHints"]["variableTypes"], false);
         assert_eq!(
             overridden["inlayHints"]["parameterNames"], "all",
             "one override does not clear the rest"
+        );
+    }
+
+    /// luau-lsp builds its own file set, and its `shared()` index above all, by filtering on
+    /// `ignoreGlobs`. Handing it the same patterns Biskit walks with is what keeps the two from
+    /// resolving the same call to different files.
+    #[test]
+    fn ignored_paths_are_forwarded_to_the_language_server() {
+        let project = ProjectSettings {
+            ignored_paths: vec!["Packages/".to_string(), "**/node_modules".to_string()],
+            ..Default::default()
+        };
+
+        let configuration = LspSettings::default().workspace_configuration(&project);
+        assert_eq!(
+            configuration["ignoreGlobs"],
+            serde_json::json!(["Packages/", "**/node_modules"])
+        );
+    }
+
+    #[test]
+    fn an_explicit_ignore_globs_override_wins_outright() {
+        let project = ProjectSettings {
+            ignored_paths: vec!["Packages/".to_string()],
+            ..Default::default()
+        };
+        let settings = LspSettings {
+            server_settings: serde_json::json!({"luau-lsp.ignoreGlobs": ["only/this"]}),
+            ..LspSettings::default()
+        };
+
+        let configuration = settings.workspace_configuration(&project);
+        assert_eq!(
+            configuration["ignoreGlobs"],
+            serde_json::json!(["only/this"])
+        );
+    }
+
+    #[test]
+    fn no_ignored_paths_leaves_the_servers_own_default_alone() {
+        let configuration =
+            LspSettings::default().workspace_configuration(&ProjectSettings::default());
+        assert!(
+            configuration.get("ignoreGlobs").is_none(),
+            "an empty list would clobber the server's default rather than say nothing"
         );
     }
 
