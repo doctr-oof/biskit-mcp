@@ -149,6 +149,10 @@ pub struct ToolSettings {
     pub max_listing_entries: usize,
     pub max_pattern_matches: usize,
     pub max_reference_matches: usize,
+    /// Keep symbol trees under `.biskit/cache/` so an unchanged file is not asked about again.
+    pub symbol_cache: bool,
+    /// Trees held before the least recently used are dropped. 0 lifts the ceiling.
+    pub max_cached_symbol_files: usize,
 }
 
 impl Default for LspSettings {
@@ -196,6 +200,8 @@ impl Default for ToolSettings {
             max_listing_entries: 2_000,
             max_pattern_matches: 200,
             max_reference_matches: 200,
+            symbol_cache: true,
+            max_cached_symbol_files: 4_000,
         }
     }
 }

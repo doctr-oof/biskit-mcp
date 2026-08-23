@@ -83,10 +83,28 @@ enum Command {
         #[arg(long)]
         tag: Option<String>,
     },
+    /// Inspect and clear the caches Biskit keeps inside a project.
+    Cache {
+        #[command(subcommand)]
+        which: CacheCommand,
+    },
     /// Emit agent hook payloads.
     Hook {
         #[command(subcommand)]
         which: HookCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommand {
+    /// Delete the stored symbol index. The next session rebuilds it as it goes.
+    Clear {
+        /// Project root. Defaults to the nearest marked ancestor of the working directory.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Use the working directory as the project root without searching upwards.
+        #[arg(long, conflicts_with = "project")]
+        project_from_cwd: bool,
     },
 }
 
@@ -136,6 +154,13 @@ fn main() -> Result<()> {
             project_from_cwd,
         } => run_doctor(RootRequest::new(project, project_from_cwd)),
         Command::Upgrade { tag } => upgrade::run(tag),
+        Command::Cache {
+            which:
+                CacheCommand::Clear {
+                    project,
+                    project_from_cwd,
+                },
+        } => run_cache_clear(RootRequest::new(project, project_from_cwd)),
         Command::Hook {
             which:
                 HookCommand::SessionStart {
@@ -388,6 +413,18 @@ fn run_doctor(request: RootRequest) -> Result<()> {
 
     let memories = MemoryStore::new(project).list()?;
     println!("memories          {}", memories.len());
+    Ok(())
+}
+
+fn run_cache_clear(request: RootRequest) -> Result<()> {
+    let (root, _) = resolve_root(request)?;
+    let project = Project::open(root)?;
+    let directory = lsp::cache::cache_dir(&project);
+
+    match lsp::cache::SymbolCache::clear(&project)? {
+        true => println!("removed {}", directory.display()),
+        false => println!("nothing cached at {}", directory.display()),
+    }
     Ok(())
 }
 

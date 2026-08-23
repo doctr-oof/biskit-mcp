@@ -403,7 +403,7 @@ impl<'a> SymbolQuery<'a> {
             if matches.len() >= probe {
                 break;
             }
-            let (symbols, content) = match session.document_symbols(&path).await {
+            let (symbols, content) = match self.handle.document_symbols(&session, &path).await {
                 Ok(found) => found,
                 // One file failing to parse is worth stepping over. A server that has stopped
                 // answering is not: every remaining file would burn a full request timeout,
@@ -446,7 +446,7 @@ impl<'a> SymbolQuery<'a> {
         ensure_luau_file(&path)?;
 
         let session = self.handle.session().await?;
-        let (symbols, content) = session.document_symbols(&path).await?;
+        let (symbols, content) = self.handle.document_symbols(&session, &path).await?;
         let lines = LineIndex::new(&content);
 
         let options = RenderOptions {
@@ -474,7 +474,7 @@ impl<'a> SymbolQuery<'a> {
         ensure_luau_file(&path)?;
 
         let pattern = NamePathPattern::parse(name_path, false);
-        let (symbols, content) = session.document_symbols(&path).await?;
+        let (symbols, content) = self.handle.document_symbols(session, &path).await?;
 
         let mut found = Vec::new();
         for root in &symbols {
@@ -557,8 +557,9 @@ impl<'a> SymbolQuery<'a> {
 
         // The containing symbol is context on the answer rather than part of it, so a file whose
         // symbol tree cannot be built still resolves to a position the server can be asked about.
-        let symbols = session
-            .document_symbols(&path)
+        let symbols = self
+            .handle
+            .document_symbols(session, &path)
             .await
             .map(|(symbols, _)| symbols)
             .unwrap_or_default();
@@ -825,7 +826,7 @@ impl<'a> SymbolQuery<'a> {
         ensure_luau_file(&path)?;
 
         let session = self.handle.session().await?;
-        let (symbols, content) = session.document_symbols(&path).await?;
+        let (symbols, content) = self.handle.document_symbols(&session, &path).await?;
         let relative = self.project().relativize(&path)?;
 
         // Comments are blanked rather than removed so a `return` inside one is not mistaken for
@@ -1120,7 +1121,8 @@ impl<'a> SymbolQuery<'a> {
             let Ok(relative) = self.project().relativize(&target) else {
                 continue;
             };
-            let Ok((symbols, content)) = session.document_symbols(&target).await else {
+            let Ok((symbols, content)) = self.handle.document_symbols(session, &target).await
+            else {
                 continue;
             };
             let lines = LineIndex::new(&content);
@@ -1163,8 +1165,9 @@ impl<'a> SymbolQuery<'a> {
             let Ok(relative) = self.project().relativize(&target) else {
                 continue;
             };
-            let (symbols, content) = session
-                .document_symbols(&target)
+            let (symbols, content) = self
+                .handle
+                .document_symbols(session, &target)
                 .await
                 .unwrap_or_else(|_| (Vec::new(), Arc::from("")));
             let lines = LineIndex::new(&content);
@@ -1210,8 +1213,9 @@ impl<'a> SymbolQuery<'a> {
 
         let session = self.handle.session().await?;
         let diagnostics = session.diagnostics(&path).await?;
-        let symbols = session
-            .document_symbols(&path)
+        let symbols = self
+            .handle
+            .document_symbols(&session, &path)
             .await
             .map(|(symbols, _)| symbols)
             .unwrap_or_default();

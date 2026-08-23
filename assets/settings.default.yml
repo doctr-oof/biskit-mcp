@@ -118,9 +118,24 @@ tools:
   # max_answer_chars: 150000
 
   # max_listing_entries: 2000
+
+  # Cap on what search_for_pattern returns. In the default snippet mode this counts
+  # snippets; in "files" and "counts" mode it counts files, so a reported count is
+  # the file's real count rather than however much of the budget was left.
   # max_pattern_matches: 200
 
   # Cap on references returned by find_referencing_symbols. Kept separate from
   # max_listing_entries because a reference carries a source snippet and a name
   # path, where a listing entry is one path.
   # max_reference_matches: 200
+
+  # Keep symbol trees in .biskit/cache/ across sessions, keyed by each file's path,
+  # size, and modification time. A file that has not moved is answered from the
+  # index instead of costing another round trip to the language server, which is
+  # what a project-wide find_symbol pays once per candidate file. Turn it off to
+  # ask the language server every time.
+  # symbol_cache: true
+
+  # How many symbol trees the index holds before the ones nothing has reached for
+  # are dropped. Set to 0 to keep every file ever indexed.
+  # max_cached_symbol_files: 4000

@@ -1,4 +1,5 @@
 pub mod acquire;
+pub mod cache;
 pub mod client;
 pub mod name_path;
 pub mod protocol;

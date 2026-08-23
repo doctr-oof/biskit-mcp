@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, sleep};
 
 use super::acquire::{self, LanguageServerInstall};
+use super::cache::{SourceStamp, SymbolCache};
 use super::client::{LspConnection, ServerEvent};
 use super::protocol::{
     Diagnostic, DocumentDiagnosticReport, DocumentSymbolResponse, GotoResponse, Hover, InlayHint,
@@ -561,6 +562,7 @@ pub struct LanguageServerHandle {
     project: Project,
     settings: Settings,
     session: Mutex<Option<Arc<Session>>>,
+    symbols: SymbolCache,
 }
 
 /// Whether a language server is up, reported without waiting on one that is coming up.
@@ -585,11 +587,63 @@ impl ServerState {
 
 impl LanguageServerHandle {
     pub fn new(project: Project, settings: Settings) -> Self {
+        let symbols = SymbolCache::new(&project, &settings.tools);
         Self {
             project,
             settings,
             session: Mutex::new(None),
+            symbols,
         }
+    }
+
+    /// The symbol tree of `path` and the text it was built from, served from the persistent index
+    /// when the file has not moved since it was last indexed.
+    ///
+    /// The body still has to be read, because every caller turns it into a `LineIndex`, but a read
+    /// of a file already in the page cache is not a round trip through the language server's
+    /// single stdio pipe, which is what a project-wide sweep pays for once per candidate file.
+    pub async fn document_symbols(
+        &self,
+        session: &Session,
+        path: &Path,
+    ) -> Result<(Vec<SymbolNode>, Arc<str>)> {
+        // The stamp is taken once, before the tree is produced, so a file written during the
+        // request is stored under the stamp of the text the tree actually describes, and the next
+        // session sees a miss rather than a tree that no longer matches the file.
+        let key = match self.symbols.enabled() {
+            true => self.project.relativize(path).ok(),
+            false => None,
+        };
+        let stamp = match &key {
+            Some(_) => SourceStamp::of(path).await,
+            None => None,
+        };
+
+        if let (Some(key), Some(stamp)) = (&key, stamp)
+            && let Some(cached) = self.symbols.get(key, stamp).await
+            && let Ok(content) = tokio::fs::read_to_string(path).await
+            // Stamped again after the read, because a file written between the two would pair a
+            // stored tree with text it does not describe, and every line the answer names would
+            // be off by whatever the write moved.
+            && SourceStamp::of(path).await == Some(stamp)
+        {
+            return Ok((cached, Arc::from(content)));
+        }
+
+        let (symbols, content) = session.document_symbols(path).await?;
+        if let (Some(key), Some(stamp)) = (&key, stamp)
+            // Stored only when the file held still while the tree was being built. Storing a tree
+            // under the stamp of text it does not describe survives on disk, so a later checkout
+            // back to that text would be answered from it, confidently and wrongly.
+            && SourceStamp::of(path).await == Some(stamp)
+        {
+            self.symbols.put(key, stamp, &symbols).await;
+        }
+        Ok((symbols, content))
+    }
+
+    pub fn symbol_cache(&self) -> &SymbolCache {
+        &self.symbols
     }
 
     pub async fn session(&self) -> Result<Arc<Session>> {
@@ -662,6 +716,10 @@ impl LanguageServerHandle {
     }
 
     pub async fn stop(&self) {
+        // Whatever the last sweep indexed but did not reach the flush threshold with is written
+        // here, so a short session still leaves the next one warmer than it found things.
+        self.symbols.flush().await;
+
         let mut guard = self.session.lock().await;
         // Shut down through the `Arc` rather than requiring sole ownership of it. Demanding
         // ownership meant that any tool call still holding a clone silently skipped the shutdown,

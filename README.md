@@ -237,9 +237,24 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `tools.excluded` | empty | Tool names to hide from the agent |
 | `tools.max_answer_chars` | `150000` | Ceiling on one tool result, 0 to lift it |
 | `tools.max_reference_matches` | `200` | Cap on references from `find_referencing_symbols` |
+| `tools.symbol_cache` | `true` | Keep symbol trees across sessions, see below |
+| `tools.max_cached_symbol_files` | `4000` | Trees kept before the least used are dropped, 0 for no ceiling |
 
 A structured result over `max_answer_chars` is refused with a message naming what to narrow. A text
 result, such as a memory, is cut instead and says how much was withheld.
+
+### Symbol index cache
+
+A project-wide `find_symbol` asks the language server for a symbol tree once per file that survives
+the literal prefilter, through a single stdio pipe, every session from cold. Almost none of those
+files changed since the last session asked about them.
+
+Biskit stores the trees in `.biskit/cache/symbols.json`, keyed by each file's path, size, and
+modification time, and answers from the index when all three still match. The directory writes its
+own `.gitignore`, so nothing in it is ever committed. A file that has been edited, or deleted since
+it was indexed, is never answered from the index.
+
+Clear it with `biskit-mcp cache clear`, or turn it off with `tools.symbol_cache: false`.
 
 ### Memory-only mode
 
@@ -264,9 +279,11 @@ Memory, `list_dir`, `find_file`, and `search_for_pattern` keep working. Put it i
 | `biskit-mcp setup` | Register Biskit in the agent config files a project uses |
 | `biskit-mcp doctor` | Verify settings, acquisition, and sourcemap state |
 | `biskit-mcp upgrade` | Replace this executable with a published release |
+| `biskit-mcp cache clear` | Delete the stored symbol index for a project |
 | `biskit-mcp hook session-start` | Emit SessionStart context for Claude Code |
 
-`start`, `doctor`, and `hook session-start` discover the project root by searching upwards. `init`
+`start`, `doctor`, `cache clear`, and `hook session-start` discover the project root by searching
+upwards. `init`
 and `setup` always use the working directory unless you pass `--project`. On `setup`,
 `--project-from-cwd` means something different: it does not choose the directory being configured,
 it writes that flag into the registration the command generates. `upgrade` has no project at all.
