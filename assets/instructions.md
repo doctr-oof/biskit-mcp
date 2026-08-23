@@ -39,7 +39,6 @@ Skipping this step is the most expensive mistake you can make here. Memories exi
 | Find what a module requires, or what requires it | `get_require_graph` |
 | Translate between a file and its place in the game | `resolve_instance_path` |
 | Check a real Roblox class, member, or enum | `query_roblox_api` |
-| Rename a symbol across the project | `plan_symbol_rename` |
 | Check whether a file type-checks | `get_file_diagnostics` |
 | Check a symbol and its callers for breakage after an edit | `get_symbol_diagnostics` |
 | Find files by name or glob | `find_file` |
@@ -113,6 +112,8 @@ This project is a game, not a folder of scripts. Where a file lands in the DataM
 
 Requires resolved through sourcemap, so `script.Parent.Parent.Shared.X`, `game:GetService("ReplicatedStorage").Y`, `:WaitForChild("Z")`, and `@Alias/Module` all resolve. Requires that cannot be resolved statically — `require(modules[name])`, require through wrapper function — land in `unresolved` with reason. Read that list. Empty `dependencies` plus non-empty `unresolved` means module has real dependencies Biskit cannot see, not that it has none. Project using runtime module loader instead of `require` has empty graph and that is honest, not broken.
 
+`shared("Foo")` is a require too. Sawhorse frameworks give the `shared` global a `__call` metamethod, so it requires the module whose file is named `Foo.luau`. The language server resolves it as `require`, and so does the graph: those calls are ordinary edges in `dependencies` and `dependents`. Bare stem or partial path (`shared("Jobs/Runner")`), case-insensitive, `dir/init.luau` addressed as `dir`. Where several files carry the name, nearest in the instance tree wins; genuine tie lands in `unresolved` naming every candidate, so pick one and write the partial path. `shared(name)` and `shared("a" .. b)` land in `unresolved` — the language server does not resolve those either, so the diagnostic on that line is real. `shared.someField` is table access, not a require. If `get_status` reports `shared_require.graph_edges` false, the graph is not counting these calls and its dependency lists understate what the module actually needs.
+
 `resolve_instance_path` goes both ways. Pass `instance_path` for file behind `game.ReplicatedStorage.Shared.Combat`; pass `relative_path` for where `src/Shared/Combat/init.luau` ends up in game. Never guess this translation. File that resolves to nothing is not synced by rojo project, so editing it changes nothing at runtime.
 
 Every DataModel answer carries `sourcemap` with mtime and age. Old sourcemap describes game that no longer exists. Check it before trusting instance path that surprises you.
@@ -120,16 +121,6 @@ Every DataModel answer carries `sourcemap` with mtime and age. Old sourcemap des
 `query_roblox_api` is ground truth for Roblox API, read from same type definitions the checker uses. Do not recall Roblox API from memory — hallucinated method looks exactly like real one until it runs.
 
 Ask it for class (`BasePart`), member (`TweenService:Create`, `BasePart.Anchored`), or enum (`Enum.EasingStyle`). Member answer carries signature, parameter docs, return docs, deprecation plus replacement. Class answer lists own members only; pass `include_inherited: true` to walk ancestry, `member_filter` to narrow. Members hidden at current `lsp.roblox_security_level` are absent, and answer names the level it read.
-
-## Renaming a symbol
-
-`plan_symbol_rename` returns edits, applies none. Biskit never writes source; you apply plan with own edit tools.
-
-Result is `edits` keyed by file, each entry `line`, `column`, `end_line`, `end_column`, `old_text`, `new_text`, sorted by position. Apply each file's edits bottom upwards so earlier positions stay valid.
-
-Use this instead of search and replace. Grep rename hits same-named symbol in unrelated module and misses call site written differently; language server hits exactly binding you named.
-
-`note` plus `references` in result and empty `edits` means server produced no plan. Those references are every use it sees, not rename plan — verify each before touching it.
 
 ## After you edit code
 

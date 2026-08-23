@@ -202,8 +202,6 @@ These are all of the tools Biskit provides your agent. You can exclude them via 
 - **Types**: `explain_symbol` for the type the checker inferred rather than the one written down,
   `get_inlay_hints` for those types over a line range, `get_signature_help` for the arguments of a
   call.
-- **Refactoring**: `plan_symbol_rename` returns every edit a rename would make and applies none of
-  them, so your own edit tools do the writing and no call site is missed.
 - **Roblox**: `resolve_instance_path` translates between the DataModel and the files on disk in
   either direction, `get_require_graph` reports what a module requires and what requires it plus
   any require cycles, `query_roblox_api` answers questions about the real Roblox API from the type
@@ -232,8 +230,9 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `lsp.roblox_security_level` | `PluginSecurity` | Which Roblox API dump to load |
 | `lsp.sourcemap` | `sourcemap.json` | Rojo sourcemap path, or null to disable |
 | `lsp.server_settings` | empty | Raw luau-lsp settings in VS Code dotted-key form |
-| `project.ignored_paths` | empty | Extra gitignore-style exclusions, applied to every project walk |
+| `project.ignored_paths` | empty | Extra gitignore-style exclusions, applied to every project walk and forwarded to luau-lsp |
 | `project.memory_only` | `false` | Run without the language server, see below |
+| `project.shared_require` | `true` | Count `shared("Name")` as a dependency edge, see below |
 | `tools.excluded` | empty | Tool names to hide from the agent |
 | `tools.max_answer_chars` | `150000` | Ceiling on one tool result, 0 to lift it |
 | `tools.max_reference_matches` | `200` | Cap on references from `find_referencing_symbols` |
@@ -255,6 +254,32 @@ own `.gitignore`, so nothing in it is ever committed. A file that has been edite
 it was indexed, is never answered from the index.
 
 Clear it with `biskit-mcp cache clear`, or turn it off with `tools.symbol_cache: false`.
+
+### The `shared()` require
+
+Sawhorse Roblox frameworks give the `shared` global a `__call` metamethod, so `shared("Foo")` is a
+runtime require of the module whose file is named `Foo.luau`. The carpenter fork teaches the language
+server to resolve it exactly as it resolves `require`, which is why hover, diagnostics, go to
+definition, signature help, and every other LSP-backed tool already understand it.
+
+Biskit's require graph does not go through the language server, so it resolves the same calls itself,
+the same way the fork does:
+
+- The argument has to be a string literal. `shared(name)` and `shared("a" .. b)` are reported under
+  `unresolved` with a reason, the same as any require Biskit cannot read statically.
+- A bare stem (`shared("Combat")`) or a partial path (`shared("Jobs/Runner")`) both resolve, and both
+  are case-insensitive. `dir/init.luau` is addressed as `dir`.
+- Where several files carry the name, the one nearest the requiring module in the instance tree wins.
+  A genuine tie is reported under `unresolved` listing every candidate, rather than guessed at.
+- `shared.someField` is still ordinary table access and is never treated as a require, and neither is
+  a `shared` the file bound locally.
+
+Turn it off with `project.shared_require: false` if your project does not use the paradigm. Note that
+this only stops Biskit's require graph from following those calls. The fork has no matching switch, so
+the language server keeps resolving them and `get_status` will report the disagreement.
+
+`get_status` also warns when `lsp.version` is pinned below `v0.2.0`, the first carpenter release that
+resolves `shared()` at all.
 
 ### Memory-only mode
 
