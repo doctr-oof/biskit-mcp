@@ -84,6 +84,10 @@ pub async fn module_context(
 
     let sourcemap = index.sourcemap().await?;
     let node = sourcemap.nodes_for_file(&relative).first().copied();
+    let class_name = node.map(|node| sourcemap.node(node).class_name.clone());
+    let service = node
+        .and_then(|node| sourcemap.service_of(node))
+        .map(str::to_string);
     let mut notes = Vec::new();
 
     if node.is_none() {
@@ -116,7 +120,10 @@ pub async fn module_context(
     };
 
     let query = SymbolQuery::new(handle);
-    let api = match query.module_api(&relative, max_entries).await {
+    let api = match query
+        .module_api(&relative, class_name.as_deref(), max_entries)
+        .await
+    {
         Ok(api) => Some(api),
         Err(error) => {
             notes.push(format!("the public surface could not be read: {error}"));
@@ -138,14 +145,11 @@ pub async fn module_context(
         }
     };
 
-    let service = node
-        .and_then(|node| sourcemap.service_of(node))
-        .map(str::to_string);
     Ok(ModuleContext {
         relative_path: relative,
         instance_path: node.map(|node| sourcemap.node(node).instance_path.clone()),
-        class_name: node.map(|node| sourcemap.node(node).class_name.clone()),
-        role: role_of(service.as_deref()),
+        role: role_of(class_name.as_deref(), service.as_deref()),
+        class_name,
         service,
         requires,
         required_by,
@@ -168,7 +172,16 @@ fn count_by_severity(
     counts
 }
 
-fn role_of(service: Option<&str>) -> &'static str {
+/// Where the code runs, from the class first and the service only after it.
+///
+/// A `Script` runs on the server and a `LocalScript` on the client wherever they sit, so a service that reads as shared cannot override either. Rojo sourcemaps carry no RunContext, so a `Script` placed for a client RunContext is still reported as server.
+fn role_of(class_name: Option<&str>, service: Option<&str>) -> &'static str {
+    match class_name {
+        Some("LocalScript") => return "client",
+        Some("Script") => return "server",
+        _ => {}
+    }
+
     let Some(service) = service else {
         return "unknown";
     };
@@ -189,7 +202,10 @@ const NOT_SYNCED_NOTE: &str = "this file is not in the sourcemap, so it is not s
                                runtime, unless the sourcemap is simply out of date.";
 
 const NOT_SCANNED_NOTE: &str = "this file is outside the set Biskit scans, so its requires and \
-                                its dependents are not known. Check project.ignored_paths.";
+                                its dependents are not known. Two settings decide that set: \
+                                project.respect_gitignore, on by default, and \
+                                project.ignored_paths. Files the sourcemap names are scanned \
+                                whatever either says.";
 
 #[cfg(test)]
 mod tests {
@@ -197,10 +213,25 @@ mod tests {
 
     #[test]
     fn only_unambiguous_services_decide_where_code_runs() {
-        assert_eq!(role_of(Some("ServerScriptService")), "server");
-        assert_eq!(role_of(Some("StarterPlayer")), "client");
-        assert_eq!(role_of(Some("ReplicatedStorage")), "shared");
-        assert_eq!(role_of(Some("Chat")), "unknown");
-        assert_eq!(role_of(None), "unknown");
+        assert_eq!(role_of(None, Some("ServerScriptService")), "server");
+        assert_eq!(role_of(None, Some("StarterPlayer")), "client");
+        assert_eq!(role_of(None, Some("ReplicatedStorage")), "shared");
+        assert_eq!(role_of(None, Some("Chat")), "unknown");
+        assert_eq!(role_of(None, None), "unknown");
+    }
+
+    #[test]
+    fn the_class_decides_where_code_runs_before_the_service_does() {
+        assert_eq!(role_of(Some("Script"), Some("ReplicatedStorage")), "server");
+        assert_eq!(
+            role_of(Some("LocalScript"), Some("ReplicatedStorage")),
+            "client"
+        );
+        assert_eq!(
+            role_of(Some("ModuleScript"), Some("ReplicatedStorage")),
+            "shared",
+            "a module is only as shared as where it sits"
+        );
+        assert_eq!(role_of(Some("Script"), None), "server");
     }
 }
