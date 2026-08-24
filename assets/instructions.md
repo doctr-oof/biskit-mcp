@@ -102,6 +102,8 @@ Point at symbol two ways: `name_path` plus `relative_path`, or `line` plus `colu
 
 Returns `signature` always, `documentation` only with `include_documentation: true`. Docs verbose, so opt in when you need behavior, not when you need shape.
 
+`name_path` names symbol at position, resolved through same lookup `find_declaration` makes, so two tools agree about one position. `declared_in` set when that declaration lives in another file. `containing_symbol` names symbol position sits inside, which is different question. Declaration language server cannot place inside project leaves `name_path` absent and says so in `note`.
+
 `find_declaration` takes `name_path` or `line`/`column`, same as `explain_symbol`. `name_path` only resolves against symbols the named file itself declares, so it cannot start from a call site — point `line`/`column` at the name in the call to follow symbol into file that declares it. Result reports symbol's full range, not just its declaration line.
 
 `get_type_definition` different question from `find_declaration`. `find_declaration` = where this value declared. `get_type_definition` = where type declared, usually `export type` in shared module. Beats grepping `export type`.

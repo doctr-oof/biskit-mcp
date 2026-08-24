@@ -1,13 +1,18 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use super::{POINT_HINT, SymbolPoint, SymbolQuery};
+use super::render::group_locations_by_file;
+use super::{POINT_HINT, ResolvedPoint, SymbolPoint, SymbolQuery};
 use crate::bail_hint;
 use crate::lsp::client;
-use crate::lsp::protocol::{Documentation, SignatureHelp};
-use crate::lsp::symbols::{find_identifier, is_identifier_byte};
+use crate::lsp::protocol::{Documentation, Location, SignatureHelp};
+use crate::lsp::session::Session;
+use crate::lsp::symbols::{SymbolNode, find_identifier, is_identifier_byte};
 
 const MAX_DOCUMENTATION_CHARS: usize = 4_000;
+
+const OUTSIDE_ROOT_NOTE: &str = "the declaration resolved outside the project root, so no \
+                                 name_path is reported";
 
 const NO_SIGNATURES_NOTE: &str = "the language server answered with no signatures, and it does not \
                                   say why. The usual cause is a position outside the parentheses \
@@ -23,14 +28,34 @@ pub struct SymbolExplanation {
     pub relative_path: String,
     pub line: u32,
     pub column: u32,
+    /// The symbol the position names, not the one it sits inside.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_path: Option<String>,
+    /// Set when the declaration is in a file other than the one asked about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_in: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// The symbol the position sits inside, which is a different question from `name_path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub containing_symbol: Option<String>,
     /// The resolved type, taken from the code half of the hover.
     pub signature: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Where the declaration behind a position landed.
+enum DeclarationSite {
+    Named {
+        name_path: String,
+        kind: String,
+        relative_path: String,
+    },
+    OutsideRoot,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,23 +117,93 @@ impl<'a> SymbolQuery<'a> {
             );
         }
 
+        let here = resolved
+            .symbol
+            .as_ref()
+            .map(|symbol| (symbol.name_path.clone(), symbol.kind_label().to_string()));
+
+        let (name_path, declared_in, kind, containing_symbol, note) = match point {
+            SymbolPoint::NamePath(_) => {
+                let (name_path, kind) = here.unzip();
+                (name_path, None, kind, None, None)
+            }
+            SymbolPoint::LineColumn { .. } => {
+                let containing = here.map(|(name_path, _)| name_path);
+                match self.declaration_at(&session, &resolved).await {
+                    DeclarationSite::Named {
+                        name_path,
+                        kind,
+                        relative_path,
+                    } => (
+                        Some(name_path),
+                        (relative_path != resolved.relative_path).then_some(relative_path),
+                        Some(kind),
+                        containing,
+                        None,
+                    ),
+                    DeclarationSite::OutsideRoot => (
+                        None,
+                        None,
+                        None,
+                        containing,
+                        Some(OUTSIDE_ROOT_NOTE.to_string()),
+                    ),
+                    DeclarationSite::Unknown => (None, None, None, containing, None),
+                }
+            }
+        };
+
         Ok(SymbolExplanation {
             signature: strip_unbound_generics(&signature),
             relative_path: resolved.relative_path,
             line: resolved.position.line + 1,
             column: resolved.position.character + 1,
-            name_path: resolved
-                .symbol
-                .as_ref()
-                .map(|symbol| symbol.name_path.clone()),
-            kind: resolved
-                .symbol
-                .as_ref()
-                .map(|symbol| symbol.kind_label().to_string()),
+            name_path,
+            declared_in,
+            kind,
+            containing_symbol,
             documentation: include_documentation
                 .then(|| cap_documentation(documentation))
                 .filter(|text| !text.is_empty()),
+            note,
         })
+    }
+
+    /// The symbol a position names, resolved through the same lookup `find_declaration` makes.
+    ///
+    /// The innermost symbol at the position answers a different question — what the position sits
+    /// inside — so a call site would come back named after its caller.
+    async fn declaration_at(&self, session: &Session, resolved: &ResolvedPoint) -> DeclarationSite {
+        let Ok(locations) = session.definition(&resolved.path, resolved.position).await else {
+            return DeclarationSite::Unknown;
+        };
+        if locations.is_empty() {
+            return DeclarationSite::Unknown;
+        }
+
+        let mut outside = false;
+        for (target, group) in group_locations_by_file(locations) {
+            let Ok(relative_path) = self.project().relativize(&target) else {
+                outside = true;
+                continue;
+            };
+            let Ok((symbols, _)) = self.handle.document_symbols(session, &target).await else {
+                continue;
+            };
+            let Some(node) = declared_symbol(&symbols, &group) else {
+                continue;
+            };
+            return DeclarationSite::Named {
+                name_path: node.name_path.clone(),
+                kind: node.kind_label().to_string(),
+                relative_path,
+            };
+        }
+
+        match outside {
+            true => DeclarationSite::OutsideRoot,
+            false => DeclarationSite::Unknown,
+        }
     }
 
     /// The parameters of the call at `point`, without reading the callee.
@@ -181,6 +276,22 @@ impl<'a> SymbolQuery<'a> {
             signatures,
         })
     }
+}
+
+/// The symbol one of `locations` declares, and never a symbol it merely sits inside.
+///
+/// A declaration the symbol tree does not carry, such as a local in some builds, resolves to its
+/// enclosing function instead, which is the answer this whole path exists to avoid reporting.
+fn declared_symbol<'a>(
+    symbols: &'a [SymbolNode],
+    locations: &[Location],
+) -> Option<&'a SymbolNode> {
+    locations.iter().find_map(|location| {
+        let node = SymbolNode::innermost_at(symbols, location.range.start)?;
+        let declares = node.selection_range.contains(location.range.start)
+            || node.range.start == location.range.start;
+        declares.then_some(node)
+    })
 }
 
 pub(super) fn split_hover(markdown: &str) -> (String, String) {
@@ -322,6 +433,92 @@ fn cap_documentation(text: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lsp::protocol::{Position, Range};
+
+    fn at(line: u32, character: u32) -> Position {
+        Position { line, character }
+    }
+
+    fn span(start: Position, end: Position) -> Range {
+        Range { start, end }
+    }
+
+    fn node(name_path: &str, range: Range, selection_range: Range) -> SymbolNode {
+        SymbolNode {
+            name: name_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(name_path)
+                .to_string(),
+            name_path: name_path.to_string(),
+            kind: 12,
+            detail: None,
+            range,
+            selection_range,
+            children: Vec::new(),
+            member: false,
+        }
+    }
+
+    fn located(range: Range) -> Location {
+        Location {
+            uri: "file:///project/src/EconomyService.luau".to_string(),
+            range,
+        }
+    }
+
+    fn economy_service() -> Vec<SymbolNode> {
+        let mut owner = node(
+            "EconomyService",
+            span(at(0, 0), at(300, 0)),
+            span(at(0, 6), at(0, 20)),
+        );
+        owner.children.push(node(
+            "EconomyService/TakeMoney",
+            span(at(219, 0), at(240, 3)),
+            span(at(219, 25), at(219, 34)),
+        ));
+        vec![owner]
+    }
+
+    #[test]
+    fn a_definition_on_a_symbols_own_name_names_that_symbol() {
+        let symbols = economy_service();
+        let found = declared_symbol(&symbols, &[located(span(at(219, 25), at(219, 34)))]).unwrap();
+        assert_eq!(found.name_path, "EconomyService/TakeMoney");
+    }
+
+    #[test]
+    fn a_definition_the_symbol_tree_does_not_carry_names_nothing() {
+        let symbols = economy_service();
+        assert!(
+            declared_symbol(&symbols, &[located(span(at(225, 8), at(225, 12)))]).is_none(),
+            "a position inside a body declares the enclosing function, not the local asked about"
+        );
+    }
+
+    #[test]
+    fn a_definition_at_the_start_of_a_declaration_is_taken() {
+        let symbols = economy_service();
+        let found = declared_symbol(&symbols, &[located(span(at(219, 0), at(219, 8)))]).unwrap();
+        assert_eq!(found.name_path, "EconomyService/TakeMoney");
+    }
+
+    #[test]
+    fn the_first_location_that_declares_something_answers() {
+        let symbols = economy_service();
+        let found = declared_symbol(
+            &symbols,
+            &[
+                located(span(at(225, 8), at(225, 12))),
+                located(span(at(219, 25), at(219, 34))),
+            ],
+        )
+        .unwrap();
+        assert_eq!(found.name_path, "EconomyService/TakeMoney");
+
+        assert!(declared_symbol(&symbols, &[]).is_none());
+    }
 
     #[test]
     fn hover_splits_on_its_fences_and_drops_the_separator() {
