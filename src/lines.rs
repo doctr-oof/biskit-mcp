@@ -89,6 +89,42 @@ impl<'a> LineIndex<'a> {
     }
 }
 
+/// The byte offset in `line` that an LSP `character` column points at.
+///
+/// LSP columns are UTF-16 code units unless `positionEncoding` was negotiated, which this crate
+/// never does. The result is always a char boundary, and a column past the end of the line clamps
+/// to its length, so the return value is always safe to slice with.
+pub fn utf16_column_to_byte(line: &str, column: usize) -> usize {
+    if line.is_ascii() {
+        return column.min(line.len());
+    }
+
+    let mut units = 0usize;
+    for (offset, character) in line.char_indices() {
+        if units >= column {
+            return offset;
+        }
+        units += character.len_utf16();
+    }
+    line.len()
+}
+
+/// The LSP `character` column of the byte at `offset` in `line`, the inverse of `utf16_column_to_byte`.
+pub fn byte_to_utf16_column(line: &str, offset: usize) -> usize {
+    if line.is_ascii() {
+        return offset.min(line.len());
+    }
+
+    let mut units = 0usize;
+    for (at, character) in line.char_indices() {
+        if at >= offset {
+            return units;
+        }
+        units += character.len_utf16();
+    }
+    units
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +193,41 @@ mod tests {
         let index = LineIndex::new("a\r\nb\rc\n");
         assert_eq!(index.text(0, 1), "a\nb\rc");
         assert!(matches!(index.text(0, 0), Cow::Borrowed("a")));
+    }
+
+    #[test]
+    fn utf16_columns_round_trip_through_byte_offsets() {
+        for line in [
+            "local Combat = {}",
+            "local naïve = 1",
+            "-- 日本語 comment\u{0}",
+            "local emoji = \"😀\" -- tail",
+            "",
+        ] {
+            let mut units = 0usize;
+            for (offset, character) in line.char_indices() {
+                assert_eq!(utf16_column_to_byte(line, units), offset, "{line:?}");
+                assert_eq!(byte_to_utf16_column(line, offset), units, "{line:?}");
+                units += character.len_utf16();
+            }
+            assert_eq!(utf16_column_to_byte(line, units), line.len(), "{line:?}");
+            assert_eq!(byte_to_utf16_column(line, line.len()), units, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_column_past_the_end_of_the_line_clamps_rather_than_panicking() {
+        let line = "local naïve = 1";
+        assert_eq!(utf16_column_to_byte(line, 9_999), line.len());
+        assert_eq!(&line[utf16_column_to_byte(line, 9_999)..], "");
+        assert_eq!(byte_to_utf16_column(line, 9_999), line.chars().count());
+    }
+
+    #[test]
+    fn a_column_inside_a_surrogate_pair_lands_on_a_char_boundary() {
+        let line = "😀ab";
+        let at = utf16_column_to_byte(line, 1);
+        assert!(line.is_char_boundary(at));
+        assert_eq!(&line[at..], "ab");
     }
 }

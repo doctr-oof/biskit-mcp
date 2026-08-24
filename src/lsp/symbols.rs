@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::name_path::strip_overload_suffix;
 use super::protocol::{DocumentSymbol, DocumentSymbolResponse, Position, Range, symbol_kind_label};
+use crate::lines::{byte_to_utf16_column, utf16_column_to_byte};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolNode {
@@ -37,14 +38,14 @@ impl SymbolNode {
             return start;
         };
 
-        let from = (start.character as usize).min(line.len());
+        let from = utf16_column_to_byte(line, start.character as usize);
         let window = &line[from..];
         let Some(offset) = find_identifier(window, strip_overload_suffix(&self.name)) else {
             return start;
         };
         Position {
             line: start.line,
-            character: start.character + offset as u32,
+            character: byte_to_utf16_column(line, from + offset) as u32,
         }
     }
 
@@ -103,6 +104,9 @@ pub fn find_identifier(haystack: &str, needle: &str) -> Option<usize> {
             return Some(start);
         }
         from = start + 1;
+        while from < haystack.len() && !haystack.is_char_boundary(from) {
+            from += 1;
+        }
     }
     None
 }
@@ -371,6 +375,32 @@ mod tests {
             Position {
                 line: 0,
                 character: 21
+            }
+        );
+    }
+
+    #[test]
+    fn target_position_reads_and_reports_columns_as_utf16_code_units() {
+        let content = "local t = {} -- 😀 naïve = 1\nend\n";
+
+        let mut naive = symbol("naïve", vec![]);
+        naive.selection_range = Range {
+            start: Position {
+                line: 0,
+                character: 19,
+            },
+            end: Position {
+                line: 0,
+                character: 24,
+            },
+        };
+
+        let tree = build_tree(DocumentSymbolResponse::Nested(vec![naive]));
+        assert_eq!(
+            tree[0].target_position(content),
+            Position {
+                line: 0,
+                character: 19
             }
         );
     }
