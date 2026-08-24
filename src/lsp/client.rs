@@ -21,6 +21,9 @@ pub const TERMINATED_CODE: i64 = -32000;
 /// JSON-RPC `MethodNotFound`, which a language server answers with when it does not implement a request at all.
 pub const METHOD_NOT_FOUND_CODE: i64 = -32601;
 
+/// Ceiling on one framed message, so a bad `Content-Length` cannot abort the process on an allocation it cannot serve.
+const MAX_MESSAGE_BYTES: usize = 128 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct ResponseError {
     pub code: i64,
@@ -221,13 +224,15 @@ impl LspConnection {
     }
 
     pub async fn shutdown(&self) {
-        let graceful = async {
-            let _: Value = self
-                .request_with_timeout("shutdown", Value::Null, Duration::from_secs(3))
-                .await?;
-            self.notify("exit", Value::Null).await
-        };
-        let _ = timeout(Duration::from_secs(5), graceful).await;
+        if !self.reader.is_finished() {
+            let graceful = async {
+                let _: Value = self
+                    .request_with_timeout("shutdown", Value::Null, Duration::from_secs(3))
+                    .await?;
+                self.notify("exit", Value::Null).await
+            };
+            let _ = timeout(Duration::from_secs(5), graceful).await;
+        }
 
         self.reader.abort();
         self.stderr_reader.abort();
@@ -383,6 +388,11 @@ async fn read_message(
 
     let length =
         content_length.ok_or_else(|| anyhow!("language server message lacked Content-Length"))?;
+    if length > MAX_MESSAGE_BYTES {
+        return Err(anyhow!(
+            "language server announced a {length} byte message, over the {MAX_MESSAGE_BYTES} byte ceiling"
+        ));
+    }
     body.clear();
     body.resize(length, 0);
     stdout.read_exact(body).await?;
