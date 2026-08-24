@@ -533,7 +533,7 @@ fn build(
             };
 
             match resolution {
-                Ok(Resolved::File(relative)) => match index.get(&relative) {
+                Ok(relative) => match index.get(&relative) {
                     Some(&target) if target != owner => {
                         modules[owner].dependencies.push(Edge {
                             target,
@@ -570,10 +570,6 @@ fn build(
         index,
         stamp,
     })
-}
-
-enum Resolved {
-    File(String),
 }
 
 enum CallKind {
@@ -966,7 +962,7 @@ fn resolve_shared(
     name: Option<&str>,
     index: Option<&SharedIndex>,
     requiring_relative_path: &str,
-) -> Result<Resolved, String> {
+) -> Result<String, String> {
     let Some(name) = name else {
         return Err(
             "a shared() call whose argument is not a string literal, which the language \
@@ -979,7 +975,7 @@ fn resolve_shared(
     };
 
     match index.resolve(name, requiring_relative_path) {
-        Resolution::Found(relative) => Ok(Resolved::File(relative)),
+        Resolution::Found(relative) => Ok(relative),
         Resolution::NotFound => Err(format!("shared({name:?}) names no module in the project")),
         Resolution::Ambiguous(candidates) => Err(format!(
             "shared({name:?}) is ambiguous: it matches {}, and none of them is nearer than the \
@@ -998,7 +994,7 @@ fn resolve(
     path: &Path,
     project: &Project,
     aliases: &mut AliasCache,
-) -> Result<Resolved, String> {
+) -> Result<String, String> {
     let trimmed = expression.trim();
     if trimmed.starts_with('"') || trimmed.starts_with('\'') {
         let chars: Vec<char> = trimmed.chars().collect();
@@ -1009,7 +1005,7 @@ fn resolve(
 
     let node = resolve_instance(trimmed, environment, sourcemap, script_node, 0)?;
     match sourcemap.script_file(node) {
-        Some(file) => Ok(Resolved::File(file.to_string())),
+        Some(file) => Ok(file.to_string()),
         None => Err(format!(
             "resolves to {}, which is a {} rather than a script",
             sourcemap.node(node).instance_path,
@@ -1072,7 +1068,7 @@ fn resolve_string_require(
     path: &Path,
     project: &Project,
     aliases: &mut AliasCache,
-) -> Result<Resolved, String> {
+) -> Result<String, String> {
     let directory = path
         .parent()
         .ok_or_else(|| "the requiring file has no directory".to_string())?;
@@ -1100,7 +1096,7 @@ fn resolve_string_require(
         if candidate.is_file()
             && let Ok(relative) = project.relativize(&normalize_path(&candidate))
         {
-            return Ok(Resolved::File(relative));
+            return Ok(relative);
         }
     }
     Err(format!("{literal} does not name a file on disk"))
