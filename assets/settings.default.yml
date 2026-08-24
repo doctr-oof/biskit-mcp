@@ -97,9 +97,19 @@ project:
   # These are also handed to luau-lsp as its ignoreGlobs, so the language server
   # and Biskit build the same view of the project. Set luau-lsp.ignoreGlobs under
   # lsp.server_settings to override that and let the two differ.
+  #
+  # Patterns are matched against the project root wherever a walk starts, so
+  # "src/vendor/" still excludes that directory when list_dir is called on "src".
+  # Naming an excluded directory itself as relative_path lists it anyway: the
+  # exclusion filters what a walk descends into, not where a caller points it.
   # ignored_paths: []
 
   # Honour .gitignore and .git/info/exclude when walking the project.
+  #
+  # This is what usually hides Packages/ from find_file, list_dir, and
+  # search_for_pattern. It does not hide anything from the require graph or from
+  # resolve_instance_path: files the rojo sourcemap names are part of the game,
+  # so they are scanned whether or not this is on.
   # respect_gitignore: true
 
   # Run Biskit without the Luau language server. Nothing is downloaded, no

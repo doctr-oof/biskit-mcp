@@ -205,8 +205,8 @@ These are all of the tools Biskit provides your agent. You can exclude them via 
 - **Roblox**: `resolve_instance_path` translates between the DataModel and the files on disk in
   either direction, `get_require_graph` reports what a module requires and what requires it plus
   any require cycles, `query_roblox_api` answers questions about the real Roblox API from the type
-  definitions Biskit already caches, `get_module_api` returns only what a ModuleScript hands back,
-  and `get_module_context` composes all of it into one call for a module you have not seen before.
+  definitions Biskit already caches, and `get_module_context` composes all of it into one call for a
+  module you have not seen before.
 - **Files and orientation**: `list_dir`, `find_file`, `search_for_pattern`, `initial_instructions`,
   `get_status`.
 
@@ -230,7 +230,8 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `lsp.roblox_security_level` | `PluginSecurity` | Which Roblox API dump to load |
 | `lsp.sourcemap` | `sourcemap.json` | Rojo sourcemap path, or null to disable |
 | `lsp.server_settings` | empty | Raw luau-lsp settings in VS Code dotted-key form |
-| `project.ignored_paths` | empty | Extra gitignore-style exclusions, applied to every project walk and forwarded to luau-lsp |
+| `project.ignored_paths` | empty | Extra gitignore-style exclusions, matched against the project root on every walk and forwarded to luau-lsp |
+| `project.respect_gitignore` | `true` | Honour `.gitignore` when walking the project. Files the sourcemap names are scanned either way |
 | `project.memory_only` | `false` | Run without the language server, see below |
 | `project.shared_require` | `true` | Count `shared("Name")` as a dependency edge, see below |
 | `tools.excluded` | empty | Tool names to hide from the agent |
