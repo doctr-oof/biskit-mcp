@@ -266,11 +266,20 @@ fn evict(entries: &mut HashMap<String, Entry>, capacity: usize) {
     }
 
     let excess = entries.len() - capacity;
-    let mut touched: Vec<u64> = entries.values().map(|entry| entry.touched).collect();
-    touched.sort_unstable();
+    let mut ranked: Vec<(u64, &str)> = entries
+        .iter()
+        .map(|(key, entry)| (entry.touched, key.as_str()))
+        .collect();
+    ranked.sort_unstable();
 
-    let cutoff = touched[excess - 1];
-    entries.retain(|_, entry| entry.touched > cutoff);
+    let stale: Vec<String> = ranked
+        .into_iter()
+        .take(excess)
+        .map(|(_, key)| key.to_string())
+        .collect();
+    for key in stale {
+        entries.remove(&key);
+    }
 }
 
 #[cfg(test)]
@@ -495,5 +504,27 @@ mod tests {
 
         evict(&mut entries, 0);
         assert_eq!(entries.len(), 2, "a ceiling of zero is no ceiling");
+    }
+
+    #[test]
+    fn eviction_drops_exactly_the_excess_when_entries_were_touched_at_the_same_time() {
+        let mut entries = HashMap::new();
+        for (name, touched) in [("a", 1u64), ("b", 1), ("c", 1), ("d", 4)] {
+            entries.insert(
+                name.to_string(),
+                Entry {
+                    stamp: SourceStamp {
+                        modified_nanos: 0,
+                        len: 0,
+                    },
+                    touched,
+                    symbols: Vec::new(),
+                },
+            );
+        }
+
+        evict(&mut entries, 2);
+        assert_eq!(entries.len(), 2, "a tie must not evict the whole tier");
+        assert!(entries.contains_key("d"), "the newest entry has to survive");
     }
 }
