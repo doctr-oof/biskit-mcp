@@ -33,7 +33,7 @@ pub struct DirectoryListing {
     pub directories: Vec<String>,
     pub files: Vec<String>,
     /// True when `max_listing_entries` cut the listing short.
-    #[serde(skip_serializing_if = "crate::json::is_false")]
+    #[serde(skip_serializing_if = "crate::serde_skip::is_false")]
     pub truncated: bool,
 }
 
@@ -60,7 +60,7 @@ pub struct PatternSearchResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_matches: Option<usize>,
     /// True when `max_pattern_matches` cut the result set short.
-    #[serde(skip_serializing_if = "crate::json::is_false")]
+    #[serde(skip_serializing_if = "crate::serde_skip::is_false")]
     pub truncated: bool,
 }
 

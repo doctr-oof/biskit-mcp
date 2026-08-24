@@ -78,7 +78,7 @@ pub struct MemberSummary {
     pub name: String,
     pub kind: MemberKind,
     pub declaration: String,
-    #[serde(skip_serializing_if = "crate::json::is_false")]
+    #[serde(skip_serializing_if = "crate::serde_skip::is_false")]
     pub deprecated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deprecated_use: Option<String>,
@@ -104,9 +104,9 @@ pub struct ClassAnswer {
     /// The whole ancestry, nearest first, so a member missing here can be looked for above.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inherits: Vec<String>,
-    #[serde(skip_serializing_if = "crate::json::is_false")]
+    #[serde(skip_serializing_if = "crate::serde_skip::is_false")]
     pub is_service: bool,
-    #[serde(skip_serializing_if = "crate::json::is_false")]
+    #[serde(skip_serializing_if = "crate::serde_skip::is_false")]
     pub creatable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
@@ -118,7 +118,7 @@ pub struct ClassAnswer {
     /// Every member the class carries before `member_filter` narrowed them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_member_count: Option<usize>,
-    #[serde(skip_serializing_if = "crate::json::is_false")]
+    #[serde(skip_serializing_if = "crate::serde_skip::is_false")]
     pub truncated: bool,
 }
 
@@ -129,7 +129,7 @@ pub struct MemberAnswer {
     /// Not named `kind`: that key is already the discriminator of the answer itself, and a second field by the same name would overwrite it once the two are flattened together.
     pub member_kind: MemberKind,
     pub declaration: String,
-    #[serde(skip_serializing_if = "crate::json::is_false")]
+    #[serde(skip_serializing_if = "crate::serde_skip::is_false")]
     pub deprecated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deprecated_use: Option<String>,
@@ -157,7 +157,7 @@ pub struct EnumAnswer {
     pub name: String,
     pub items: Vec<EnumItemAnswer>,
     pub item_count: usize,
-    #[serde(skip_serializing_if = "crate::json::is_false")]
+    #[serde(skip_serializing_if = "crate::serde_skip::is_false")]
     pub truncated: bool,
 }
 
