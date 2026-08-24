@@ -37,26 +37,41 @@ pub fn instructions_manual(memory_only: bool) -> &'static str {
     INSTRUCTIONS_MANUAL
 }
 
+const MANUAL_ROOT_CLOSE: &str = "</Main>";
+
 pub fn initial_instructions(memories: &[String], memory_only: bool) -> String {
-    let mut rendered = String::from(instructions_manual(memory_only));
-    rendered.push_str("\n\n## Memories available in this project\n\n");
+    let manual = instructions_manual(memory_only).trim_end();
+    let body = manual
+        .strip_suffix(MANUAL_ROOT_CLOSE)
+        .unwrap_or(manual)
+        .trim_end();
+
+    let mut rendered = String::from(body);
+    rendered.push_str(
+        "\n\n<Section name=\"AvailableMemories\" desc=\"Memory index for this project. Names \
+         only.\">\n",
+    );
 
     if memories.is_empty() {
         rendered.push_str(
-            "None yet. Consider writing one with `create_memory` when you learn something durable \
-             about this project.\n",
+            "    <Rule>\n        None yet. Consider writing one with `create_memory` when you \
+             learn something durable\n        about this project.\n    </Rule>\n",
         );
-        return rendered;
+    } else {
+        for name in memories {
+            rendered.push_str("    <Memory name=\"");
+            rendered.push_str(name);
+            rendered.push_str("\" />\n");
+        }
+        rendered.push_str(
+            "\n    <Rule>\n        This index is names only, and an index you never read is an \
+             index you never used.\n        Before you start work, `read_memory` every entry above \
+             that plausibly relates to your\n        task.\n    </Rule>\n",
+        );
     }
 
-    for name in memories {
-        rendered.push_str("- `");
-        rendered.push_str(name);
-        rendered.push_str("`\n");
-    }
-    rendered.push_str(
-        "\nThis index is names only. Before you start work, read every entry above that plausibly \
-         relates to your task with `read_memory`. Seeing the list is not the same as reading it.\n",
-    );
+    rendered.push_str("</Section>\n");
+    rendered.push_str(MANUAL_ROOT_CLOSE);
+    rendered.push('\n');
     rendered
 }
