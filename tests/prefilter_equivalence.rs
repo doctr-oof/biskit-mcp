@@ -1,16 +1,5 @@
 //! Checks that the literal pre-filter changes only the cost of `find_symbol`, never its answer.
 //!
-//! The whole optimisation rests on one assumption: `documentSymbol` reports symbols *defined* in a
-//! file, so a symbol whose name the file never spells cannot be reported for it. This test is what
-//! stops that assumption from being taken on faith.
-//!
-//! It compares a project-wide `find_symbol`, which is pre-filtered, against the union of the same
-//! query run one file at a time, which is not: a single candidate is never filtered. Any file the
-//! pre-filter wrongly discarded shows up as a result present in the per-file pass and missing from
-//! the project-wide one.
-//!
-//! Ignored by default because it needs a real checkout and a real `luau-lsp`:
-//!
 //! ```text
 //! BISKIT_TEST_PROJECT=/path/to/checkout cargo test --test prefilter_equivalence -- --ignored
 //! ```
@@ -33,12 +22,10 @@ fn request(name: &str, substring: bool) -> FindSymbolRequest {
         include_kinds: Vec::new(),
         exclude_kinds: Vec::new(),
         substring_matching: substring,
-        // High enough that neither pass is truncated, so the two sets are comparable.
         max_matches: 5_000,
     }
 }
 
-/// Every `file::name_path` pair a result reports, flattened so the two passes compare directly.
 fn flatten(result: &biskit_mcp::lsp::queries::SymbolSearchResult) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for (file, symbols) in &result.symbols {
@@ -72,9 +59,6 @@ async fn the_prefilter_never_changes_which_symbols_are_found() {
         .collect::<Vec<_>>();
     assert!(!files.is_empty(), "{root} contains no Luau source");
 
-    // A name that does not exist, a name that does, and a substring query: the three cases the
-    // audit called out, because they exercise "filter removes everything", "filter removes most",
-    // and "filter must not over-remove".
     let existing = first_defined_symbol(&handle, &files)
         .await
         .expect("no symbol found anywhere in the project to compare against");
@@ -97,7 +81,6 @@ async fn the_prefilter_never_changes_which_symbols_are_found() {
             "{name:?} was truncated; raise max_matches for a meaningful comparison"
         );
 
-        // One file at a time never reaches the pre-filter, so this is the unfiltered answer.
         let mut unfiltered = BTreeSet::new();
         for file in &files {
             let mut single = request(name, substring);
@@ -129,7 +112,6 @@ async fn the_prefilter_never_changes_which_symbols_are_found() {
     handle.stop().await;
 }
 
-/// A symbol the project actually defines, so the "name that exists" case has something to look for.
 async fn first_defined_symbol(handle: &LanguageServerHandle, files: &[String]) -> Option<String> {
     for file in files.iter().take(25) {
         let Ok(overview) = SymbolQuery::new(handle)
@@ -142,7 +124,6 @@ async fn first_defined_symbol(handle: &LanguageServerHandle, files: &[String]) -
             .symbols
             .iter()
             .filter_map(|symbol| symbol.name_path.as_deref())
-            // A leaf segment is what a bare query names, and what the pre-filter keys on.
             .filter_map(|path| path.rsplit('/').next())
             .find(|leaf| leaf.len() > 3)
         {

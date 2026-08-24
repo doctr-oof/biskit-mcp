@@ -4,7 +4,6 @@ use anyhow::{Result, bail};
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
-/// Characters that may appear unescaped in a file URI path segment.
 fn is_unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':')
 }
@@ -22,8 +21,6 @@ pub fn from_path(path: &Path) -> Result<String> {
         "file:///"
     };
 
-    // Escapes are rare in a source path, so sizing for "no escape needed" is almost always right
-    // and never wrong by more than the reallocation it saves.
     let mut encoded = String::with_capacity(prefix.len() + text.len());
     encoded.push_str(prefix);
 
@@ -33,7 +30,6 @@ pub fn from_path(path: &Path) -> Result<String> {
             encoded.push(byte as char);
             continue;
         }
-        // Pushing the two hex digits directly avoids a heap allocation per escaped byte.
         encoded.push('%');
         encoded.push(HEX_DIGITS[(byte >> 4) as usize] as char);
         encoded.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);

@@ -6,8 +6,7 @@ pub struct NamePathPattern {
 }
 
 impl NamePathPattern {
-    /// Accepts any of the three separators, so `PlayerService.addScore`,
-    /// `PlayerService/addScore`, and `PlayerService:addScore` all address the same symbol.
+    /// Accepts any of the three separators, so `PlayerService.addScore`, `PlayerService/addScore`, and `PlayerService:addScore` all address the same symbol.
     pub fn parse(pattern: &str, substring_matching: bool) -> Self {
         let trimmed = pattern.trim();
         let absolute = trimmed.starts_with('/') || trimmed.starts_with('.');
@@ -36,20 +35,12 @@ impl NamePathPattern {
     }
 
     /// The literal text a file must contain for any symbol in it to satisfy this pattern.
-    ///
-    /// A symbol cannot be defined in a file whose bytes never spell its leaf name, so a candidate
-    /// file that lacks this string can be skipped without asking the language server about it.
-    /// Substring queries hold to the same rule: the queried substring is still spelled literally
-    /// inside the definition it is meant to find.
     pub fn literal_filter(&self) -> Option<&str> {
         let leaf = strip_overload_suffix(self.segments.last()?);
         (!leaf.is_empty()).then_some(leaf)
     }
 
     /// `name_path` is the `/`-joined ancestor chain of a symbol, outermost first.
-    ///
-    /// Compared right to left so the chain never has to be split into owned segments: this runs
-    /// once per symbol node of every scanned file, which is the busiest loop in the crate.
     pub fn matches(&self, name_path: &str) -> bool {
         if self.segments.is_empty() || name_path.is_empty() {
             return false;
@@ -67,14 +58,11 @@ impl NamePathPattern {
             }
         }
 
-        // An absolute pattern has to have consumed the whole chain, leaving no outer owner.
         !(self.absolute && candidate.next().is_some())
     }
 }
 
 fn segment_matches(expected: &str, raw: &str, substring: bool) -> bool {
-    // An indexed query segment names one specific duplicate, so it is compared against the stored
-    // name with its suffix intact.
     if has_overload_suffix(expected) {
         return raw == expected;
     }
@@ -104,7 +92,6 @@ pub fn strip_overload_suffix(name: &str) -> &str {
     }
 }
 
-/// True when `name` carries the `[n]` disambiguation suffix.
 fn has_overload_suffix(name: &str) -> bool {
     strip_overload_suffix(name).len() != name.len()
 }

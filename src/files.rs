@@ -28,12 +28,11 @@ pub struct FileTools {
 
 #[derive(Debug, Default, Serialize)]
 pub struct DirectoryListing {
-    /// The listed directory, relative to the project root. Entries below are relative to this,
-    /// so the prefix is spelled once rather than once per entry.
+    /// The listed directory, relative to the project root.
     pub base: String,
     pub directories: Vec<String>,
     pub files: Vec<String>,
-    /// True when `max_listing_entries` cut the listing short. Omitted when false.
+    /// True when `max_listing_entries` cut the listing short.
     #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
 }
@@ -46,9 +45,6 @@ pub struct PatternMatch {
 }
 
 /// What a search reports about the files it matched.
-///
-/// Only the field the requested mode fills is present, so a files-only search costs the caller a
-/// list of paths rather than a list of paths each carrying its own snippet.
 #[derive(Debug, Default, Serialize)]
 pub struct PatternSearchResult {
     /// Snippet mode: the matching lines and their context, grouped by file.
@@ -63,7 +59,7 @@ pub struct PatternSearchResult {
     /// Counts mode: the sum over every file reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_matches: Option<usize>,
-    /// True when `max_pattern_matches` cut the result set short. Omitted when false.
+    /// True when `max_pattern_matches` cut the result set short.
     #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
 }
@@ -89,13 +85,11 @@ pub struct PatternSearchRequest<'a> {
     pub paths_include_glob: Option<&'a str>,
     pub paths_exclude_glob: Option<&'a str>,
     pub restrict_to_code_files: bool,
-    /// In snippet mode this caps snippets; in the other two it caps files reported, so the counts
-    /// a file reports stay true rather than being cut mid-file.
+    /// In snippet mode this caps snippets; in the other two it caps files reported.
     pub max_matches: usize,
     pub mode: SearchMode,
     pub case_insensitive: bool,
-    /// Lets `.` cross a line boundary. Off by default: with it on, a plain `.*` runs to the end of
-    /// the file and returns the whole thing as one match.
+    /// Lets `.` cross a line boundary.
     pub dot_matches_newline: bool,
 }
 
@@ -132,9 +126,6 @@ impl FileTools {
             }
         }
 
-        // Sorting before truncating is what makes a capped listing reproducible. The walker's
-        // traversal order is not lexicographic, so cutting the walk short at the cap returned an
-        // arbitrary subset that could differ between two calls on an unchanged directory.
         listing.directories.sort();
         listing.files.sort();
         listing.truncated = truncate_listing(&mut listing.directories, &mut listing.files, limit);
@@ -153,8 +144,6 @@ impl FileTools {
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                 continue;
             }
-            // Most files are rejected, so the glob is consulted against borrowed paths and the
-            // project-relative string is only built for the ones that survive.
             let Ok(relative) = entry.path().strip_prefix(self.project.root()) else {
                 continue;
             };
@@ -217,8 +206,6 @@ impl FileTools {
         };
 
         for path in targets {
-            // Ordered cheapest first: the extension test rejects most of a Roblox project by
-            // reading a few bytes of the path, so it runs before anything that allocates.
             if request.restrict_to_code_files && !is_code_file(&path) {
                 continue;
             }
@@ -241,8 +228,6 @@ impl FileTools {
             };
 
             match request.mode {
-                // The whole point of files mode is not to look past the first hit: a file with
-                // four hundred matches costs exactly as much as a file with one.
                 SearchMode::Files => {
                     if !regex.is_match(&contents) {
                         continue;
@@ -253,8 +238,6 @@ impl FileTools {
                     }
                     files.push(crate::project::normalize_separators(borrowed));
                 }
-                // The cap counts files rather than matches here, so a reported count is the file's
-                // real count and not however many were left in the budget.
                 SearchMode::Counts => {
                     let count = regex.find_iter(&contents).count();
                     if count == 0 {
@@ -268,8 +251,6 @@ impl FileTools {
                     counts.insert(crate::project::normalize_separators(borrowed), count);
                 }
                 SearchMode::Snippets => {
-                    // Most files hold no match at all, so the line structures the snippets need
-                    // are built on the first hit rather than for every file that was merely read.
                     let mut index: Option<LineIndex> = None;
                     let mut relative: Option<String> = None;
 
@@ -316,8 +297,6 @@ impl FileTools {
         Ok(result)
     }
 
-    /// The project-relative label for a listed directory. The root relativizes to the empty
-    /// string, which is spelled "." the same way the caller asks for it.
     fn base_label(&self, base: &Path) -> Result<String> {
         let relative = self.project.relativize(base)?;
         if relative.is_empty() {
@@ -331,8 +310,6 @@ impl FileTools {
     }
 }
 
-/// Trims a sorted listing to `limit` entries in total, directories first, and reports whether
-/// anything was dropped.
 fn truncate_listing(directories: &mut Vec<String>, files: &mut Vec<String>, limit: usize) -> bool {
     if directories.len() + files.len() <= limit {
         return false;
@@ -415,7 +392,6 @@ mod tests {
         }
     }
 
-    /// The snippet map of a search that ran in snippet mode.
     fn snippets(result: &PatternSearchResult) -> &BTreeMap<String, Vec<PatternMatch>> {
         result.matches.as_ref().expect("snippet mode fills matches")
     }
@@ -448,8 +424,6 @@ mod tests {
     #[test]
     fn a_truncated_listing_is_the_first_entries_by_name() {
         let dir = tempfile::tempdir().unwrap();
-        // Written in an order that is not the sorted order, so a walk-order truncation would
-        // return a different set from a sorted one.
         for index in [7usize, 3, 9, 1, 5, 0, 8, 2, 6, 4] {
             std::fs::write(
                 dir.path().join(format!("Module{index}.luau")),
@@ -645,8 +619,6 @@ mod tests {
         assert_eq!(matched(included), ["src/Kept.luau", "src/Skipped.luau"]);
     }
 
-    /// Two files, one of which spells the target on two separate lines, so a pattern that reaches
-    /// across lines behaves visibly differently from one that does not.
     fn multiline_fixture() -> (tempfile::TempDir, FileTools) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(

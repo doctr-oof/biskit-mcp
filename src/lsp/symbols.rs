@@ -12,9 +12,7 @@ pub struct SymbolNode {
     pub range: Range,
     pub selection_range: Range,
     pub children: Vec<SymbolNode>,
-    /// Set on a symbol nested under the owner its own name named, rather than under a symbol the
-    /// language server itself reported it inside. A member is worth showing whatever its kind,
-    /// where a local declared inside a function body is not.
+    /// Set on a symbol nested under the owner its own name named.
     #[serde(default)]
     pub member: bool,
 }
@@ -32,9 +30,7 @@ impl SymbolNode {
         self.range.contains(position)
     }
 
-    /// Position to aim LSP requests at. For a dotted or colon member the selection range starts
-    /// on the containing table, which would resolve references to the table instead of the
-    /// member, so seek forward to the leaf name.
+    /// Position to aim LSP requests at.
     pub fn target_position(&self, content: &str) -> Position {
         let start = self.selection_range.start;
         let Some(line) = content.lines().nth(start.line as usize) else {
@@ -60,10 +56,6 @@ impl SymbolNode {
     }
 
     /// Tightest symbol whose range covers `position`.
-    ///
-    /// A member nested under its owner is declared elsewhere in the file than the owner is, so the
-    /// search cannot stop descending at a parent whose own range misses the position; the tightest
-    /// range wins instead of the deepest nesting.
     pub fn innermost_at(nodes: &[SymbolNode], position: Position) -> Option<&SymbolNode> {
         let mut best: Option<&SymbolNode> = None;
         for node in nodes {
@@ -80,7 +72,6 @@ impl SymbolNode {
     }
 }
 
-/// How much ground a range covers, for choosing between two symbols that both cover a position.
 fn span(range: Range) -> (u32, u32) {
     let lines = range.end.line.saturating_sub(range.start.line);
     if lines == 0 {
@@ -143,15 +134,6 @@ pub fn build_tree(response: DocumentSymbolResponse) -> Vec<SymbolNode> {
     }
 }
 
-/// Nests each symbol under the owner its own name names.
-///
-/// luau-lsp reports table members as flat siblings carrying their owner in the name
-/// ("Config.load"), so the hierarchy the name paths spell out is not the hierarchy the response
-/// has. Rebuilding it is what gives `depth` something to descend into, and every name path is
-/// preserved exactly, so a symbol is addressed the same way before and after.
-///
-/// A member whose owner is not itself reported stays where it is: dropping it under a parent that
-/// does not exist would hide it from the top level with nothing to find it under.
 fn nest_members(nodes: Vec<SymbolNode>) -> Vec<SymbolNode> {
     if nodes.len() < 2 || !nodes.iter().any(|node| node.name_path.contains('/')) {
         return nodes;
@@ -165,8 +147,6 @@ fn nest_members(nodes: Vec<SymbolNode>) -> Vec<SymbolNode> {
             owners.entry(node.name_path.as_str()).or_insert(index);
         }
         for (index, node) in nodes.iter().enumerate() {
-            // Every owner has a strictly shorter name path than the symbol it owns, so the links
-            // can never close a cycle.
             if let Some(parent) = owner_index(&owners, &node.name_path, index) {
                 parents[index] = Some(parent);
                 children[parent].push(index);
@@ -184,8 +164,6 @@ fn nest_members(nodes: Vec<SymbolNode>) -> Vec<SymbolNode> {
         .collect()
 }
 
-/// Nearest reported ancestor of `name_path`, longest match first, so `A/B/C` lands under `A/B`
-/// where that exists and under `A` where it does not.
 fn owner_index(
     owners: &std::collections::HashMap<&str, usize>,
     name_path: &str,
@@ -223,9 +201,6 @@ fn convert_siblings(symbols: &[DocumentSymbol], prefix: &str) -> Vec<SymbolNode>
         .iter()
         .zip(disambiguated)
         .map(|(symbol, name)| {
-            // luau-lsp reports members flat, dot-separated for fields ("PlayerService.addScore")
-            // and colon-separated for methods ("PlayerService:addScore"), so both separators
-            // become name path segments and the leaf becomes the display name.
             let segments: Vec<&str> = name
                 .split(['.', ':'])
                 .filter(|part| !part.is_empty())
@@ -263,10 +238,6 @@ fn convert_siblings(symbols: &[DocumentSymbol], prefix: &str) -> Vec<SymbolNode>
 }
 
 /// Siblings sharing a name get a `[n]` suffix so each name path stays addressable.
-///
-/// Sibling groups with no duplicate at all are the overwhelming majority, and this runs for every
-/// group at every level of every scanned file, so the duplicate-free case avoids the hash maps
-/// entirely and hands back the names as they stand.
 pub fn disambiguate(symbols: &[DocumentSymbol]) -> Vec<String> {
     if !has_duplicate_names(symbols) {
         return symbols.iter().map(|symbol| symbol.name.clone()).collect();
@@ -292,8 +263,6 @@ pub fn disambiguate(symbols: &[DocumentSymbol]) -> Vec<String> {
         .collect()
 }
 
-/// Sibling groups are short, so the quadratic scan beats building a set for the sizes that occur
-/// in practice; the set is only worth its allocation once a group is large.
 fn has_duplicate_names(symbols: &[DocumentSymbol]) -> bool {
     const LINEAR_SCAN_LIMIT: usize = 16;
 
@@ -447,7 +416,6 @@ mod tests {
         assert_eq!(tree[2].name_path, "unique");
     }
 
-    /// The fast path skips the counting maps, so both sides of its size threshold need covering.
     #[test]
     fn duplicates_are_found_in_groups_of_every_size() {
         for size in [2usize, 8, 17, 64] {

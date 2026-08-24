@@ -14,13 +14,8 @@ pub const DEFAULT_ROBLOX_DOCS_URL: &str = "https://luau-lsp.pages.dev/api-docs/e
 pub const DEFAULT_STANDARD_DOCS_URL: &str = "https://luau-lsp.pages.dev/api-docs/luau-en-us.json";
 
 /// The first carpenter release whose language server resolves `shared("Name")`.
-///
-/// Pinning `lsp.version` below this leaves Biskit's require graph following `shared()` calls the
-/// language server reports as errors, which is worth telling the caller about rather than letting
-/// them discover as two tools disagreeing.
 pub const FIRST_SHARED_REQUIRE_VERSION: (u32, u32, u32) = (0, 2, 0);
 
-/// The carpenter fork publishes no checksums; these are the digests pinned for `v0.2.0`.
 const PINNED_CHECKSUMS: [(&str, &str); 4] = [
     (
         "luau-lsp-win64.zip",
@@ -64,7 +59,6 @@ pub struct Settings {
     pub tools: ToolSettings,
 }
 
-/// A section whose keys are all commented out parses as null; treat that as "use defaults".
 fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -78,7 +72,7 @@ where
 pub struct LspSettings {
     pub version: String,
     pub repository: String,
-    /// Overrides the derived GitHub release asset URL. `{version}` and `{asset}` are substituted.
+    /// Overrides the derived GitHub release asset URL.
     pub download_url_template: Option<String>,
     /// Skips acquisition entirely and uses this executable.
     pub binary_path: Option<PathBuf>,
@@ -148,11 +142,6 @@ pub struct ProjectSettings {
     /// Runs without the Luau language server: no acquisition, no process, no LSP-backed tools.
     pub memory_only: bool,
     /// Counts the carpenter fork's `shared("Name")` string require as a dependency edge.
-    ///
-    /// This governs Biskit's own require-graph scan only. The language server fork resolves
-    /// `shared()` unconditionally and has no switch for it, so turning this off does not stop
-    /// diagnostics, hover, or go-to-definition from following those calls; it only makes the
-    /// require graph stop reporting them.
     pub shared_require: bool,
 }
 
@@ -166,7 +155,7 @@ pub struct ToolSettings {
     pub max_reference_matches: usize,
     /// Keep symbol trees under `.biskit/cache/` so an unchanged file is not asked about again.
     pub symbol_cache: bool,
-    /// Trees held before the least recently used are dropped. 0 lifts the ceiling.
+    /// Trees held before the least recently used are dropped.
     pub max_cached_symbol_files: usize,
 }
 
@@ -250,13 +239,6 @@ impl LspSettings {
     }
 
     /// luau-lsp expects VS Code style dotted keys; the first segment is discarded by its parser.
-    ///
-    /// `project` is passed in so the two file sets can be made to agree. luau-lsp builds its own
-    /// view of the project — the `shared()` require index above all — by walking the workspace and
-    /// filtering on `ignoreGlobs`, where Biskit walks it filtering on `project.ignored_paths`. Left
-    /// apart, the same `shared("Foo")` can resolve one way in the require graph and another in the
-    /// diagnostics. Both take gitignore syntax matched against the workspace-relative path, so the
-    /// patterns carry across unchanged.
     pub fn workspace_configuration(&self, project: &ProjectSettings) -> Value {
         let mut dotted = Map::new();
         dotted.insert(
@@ -293,10 +275,6 @@ impl LspSettings {
             Value::Bool(false),
         );
 
-        // luau-lsp turns every inlay hint off by default, which is right for an editor where they
-        // are visual clutter and wrong for get_inlay_hints, whose whole answer is the hints. The
-        // overrides below are inserted afterwards, so lsp.server_settings can still turn any of
-        // them back off.
         for (key, value) in inlay_hint_defaults() {
             dotted.insert(key.to_string(), value);
         }
@@ -311,7 +289,6 @@ impl LspSettings {
     }
 }
 
-/// What `get_inlay_hints` needs turned on to have anything to report.
 fn inlay_hint_defaults() -> [(&'static str, Value); 5] {
     [
         (
@@ -328,7 +305,6 @@ fn inlay_hint_defaults() -> [(&'static str, Value); 5] {
     ]
 }
 
-/// Mirrors luau-lsp's `dottedToClientConfiguration`: split on `.`, drop the first segment.
 fn expand_dotted_keys(dotted: &Map<String, Value>) -> Value {
     let mut root = Map::new();
     for (key, value) in dotted {
@@ -380,8 +356,6 @@ fn read_yaml_value(path: &Path) -> Result<Value> {
     if raw.trim().is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-    // Settings files are heavily commented; capturing comment text would hit the parser's
-    // buffered-comment budget without giving Biskit anything it reads.
     let mut options = serde_saphyr::Options::default();
     options.emit_comments = false;
     let parsed: Value = serde_saphyr::from_str_with_options(&raw, options)
@@ -501,9 +475,6 @@ mod tests {
         );
     }
 
-    /// luau-lsp builds its own file set, and its `shared()` index above all, by filtering on
-    /// `ignoreGlobs`. Handing it the same patterns Biskit walks with is what keeps the two from
-    /// resolving the same call to different files.
     #[test]
     fn ignored_paths_are_forwarded_to_the_language_server() {
         let project = ProjectSettings {

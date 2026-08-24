@@ -17,11 +17,8 @@ const MISSING_SOURCEMAP_HINT: &str = "generate one with `rojo sourcemap --includ
 const DISABLED_SOURCEMAP_HINT: &str = "set lsp.sourcemap in .biskit/settings.yml to this \
                                        project's sourcemap file and restart the server";
 
-/// Children listed when a path resolves partway and then fails, so the caller can correct the
-/// segment rather than guess at it again.
 const SUGGESTED_CHILDREN: usize = 24;
 
-/// Methods that take the name of a child as their only meaningful argument.
 const CHILD_BY_NAME_METHODS: [&str; 4] = [
     "GetService",
     "WaitForChild",
@@ -29,8 +26,6 @@ const CHILD_BY_NAME_METHODS: [&str; 4] = [
     "FindFirstAncestor",
 ];
 
-/// `sourcemap.json` as rojo writes it: a tree of instances, each naming the files it was built
-/// from.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawNode {
@@ -43,10 +38,6 @@ struct RawNode {
 }
 
 /// One instance, flattened into an arena so a node can be walked in either direction.
-///
-/// The tree is read far more often than it is built, and every question Biskit asks of it is
-/// either "what is under this" or "what is above this". Parent links are what make the second one
-/// answerable at all: a `script.Parent.Parent` require cannot be resolved by descending.
 #[derive(Debug, Clone)]
 pub struct Node {
     pub name: String,
@@ -60,10 +51,6 @@ pub struct Node {
 }
 
 /// What a DataModel-typed answer reports about the sourcemap it came from.
-///
-/// A sourcemap that has not been regenerated since the last file moved describes a game that no
-/// longer exists, and nothing in the answer itself would show it. Reporting when it was written
-/// lets the caller judge the answer instead of trusting it.
 #[derive(Debug, Clone, Serialize)]
 pub struct SourcemapReference {
     pub relative_path: String,
@@ -82,7 +69,7 @@ pub struct InstanceAnswer {
     /// Every file the instance was built from, which for a folder is the directory itself.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub file_paths: Vec<String>,
-    /// The Luau file among them, where there is one. This is the path the symbol tools take.
+    /// The Luau file among them, where there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script_file: Option<String>,
     /// The top-level service it sits under, which is what decides where the code runs.
@@ -92,9 +79,6 @@ pub struct InstanceAnswer {
 }
 
 /// The answer to a translation in either direction.
-///
-/// A list rather than one instance because a rojo project is free to mount the same directory
-/// twice, and answering with the first of two would be answering a question that was not asked.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolveAnswer {
     pub instances: Vec<InstanceAnswer>,
@@ -104,8 +88,6 @@ pub struct ResolveAnswer {
 #[derive(Debug)]
 pub struct Sourcemap {
     nodes: Vec<Node>,
-    /// Every file path the sourcemap mentions, mapped to the instances built from it. A path can
-    /// name more than one instance when a project mounts the same tree twice.
     by_file: HashMap<String, Vec<usize>>,
     relative_path: String,
     stamp: Option<(SystemTime, u64)>,
@@ -142,9 +124,6 @@ impl Sourcemap {
         let mut nodes: Vec<Node> = Vec::new();
         let mut by_file: HashMap<String, Vec<usize>> = HashMap::new();
 
-        // An explicit stack rather than recursion: a sourcemap is attacker-shaped input only in
-        // the sense that it is generated, but a deeply nested tree should not decide whether the
-        // server stays up.
         let mut pending = vec![(root, None::<usize>)];
         while let Some((raw, parent)) = pending.pop() {
             let RawNode {
@@ -177,8 +156,6 @@ impl Sourcemap {
                 nodes[owner].children.push(index);
             }
 
-            // Reversed, because the stack hands them back in the order they are popped and a
-            // caller reading a child list expects the order the sourcemap wrote.
             for child in children.into_iter().rev() {
                 pending.push((child, Some(index)));
             }
@@ -252,8 +229,7 @@ impl Sourcemap {
             .map(String::as_str)
     }
 
-    /// The name of the top-level service an instance sits under, which is what decides whether
-    /// code is server-only, client-only, or replicated.
+    /// The name of the top-level service an instance sits under.
     pub fn service_of(&self, index: usize) -> Option<&str> {
         let mut current = index;
         loop {
@@ -316,11 +292,6 @@ impl Sourcemap {
     }
 
     /// Instances built from a project-relative file.
-    ///
-    /// A file is looked up as written, then as the directory that owns it: rojo names a directory
-    /// instance by the directory, and `src/Shared/Combat/init.luau` is the source of the instance
-    /// the sourcemap calls `src/Shared/Combat`. Which of the two a given rojo version wrote is not
-    /// worth making the caller know.
     pub fn nodes_for_file(&self, relative_path: &str) -> Vec<usize> {
         let normalized = normalize(relative_path);
         if let Some(found) = self.by_file.get(&normalized) {
@@ -337,10 +308,6 @@ impl Sourcemap {
     }
 
     /// Resolves an instance path written the way Roblox code writes one.
-    ///
-    /// `game.ReplicatedStorage.Shared.Combat`, `ReplicatedStorage.Shared.Combat`, and
-    /// `game:GetService("ReplicatedStorage").Shared.Combat` all name the same instance, and an
-    /// agent holding any one of them should not have to rewrite it into some canonical form first.
     pub fn resolve_instance_path(&self, instance_path: &str) -> Result<usize> {
         let segments = parse_instance_path(instance_path);
         if segments.is_empty() {
@@ -352,8 +319,6 @@ impl Sourcemap {
 
         let root = self.root();
         let mut current = root;
-        // A path may or may not start at the DataModel, and `game` is the name Roblox code uses
-        // for it whatever the rojo project is called.
         let mut rest = segments.as_slice();
         if let Some(first) = segments.first()
             && (first == "game" || *first == self.nodes[root].name)
@@ -391,8 +356,6 @@ impl Sourcemap {
     }
 }
 
-/// The DataModel is spelled `game` in every Roblox script, whatever the rojo project named it.
-/// A project that is not rooted at a DataModel, such as a model or a package, keeps its own name.
 fn root_label(name: &str, class_name: &str) -> String {
     match class_name {
         "DataModel" => "game".to_string(),
@@ -400,8 +363,7 @@ fn root_label(name: &str, class_name: &str) -> String {
     }
 }
 
-/// Splits an instance path into names, accepting every spelling Roblox code uses for the same
-/// traversal.
+/// Splits an instance path into names, accepting every spelling Roblox code uses for the same traversal.
 pub fn parse_instance_path(input: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let bytes: Vec<char> = input.chars().collect();
@@ -431,7 +393,6 @@ pub fn parse_instance_path(input: &str) -> Vec<String> {
             }
             _ => {
                 let (identifier, next) = read_identifier(&bytes, index);
-                // A character that starts no identifier would otherwise spin here forever.
                 index = if next == index { index + 1 } else { next };
                 if !identifier.is_empty() {
                     segments.push(identifier);
@@ -452,7 +413,6 @@ fn read_identifier(chars: &[char], from: usize) -> (String, usize) {
     (identifier, index)
 }
 
-/// The first string literal of a call, as in `:WaitForChild("Combat", 5)`.
 fn read_call_string(chars: &[char], from: usize) -> (Option<String>, usize) {
     let mut index = from;
     while index < chars.len() && chars[index].is_whitespace() {
@@ -488,7 +448,6 @@ fn read_call_string(chars: &[char], from: usize) -> (Option<String>, usize) {
     (literal, index)
 }
 
-/// The string literal of an index, as in `["Combat"]`.
 fn read_bracket_string(chars: &[char], from: usize) -> (Option<String>, usize) {
     let mut index = from + 1;
     let mut literal = None;
@@ -525,8 +484,7 @@ fn read_string(chars: &[char], from: usize, quote: char) -> (String, usize) {
     (text, index)
 }
 
-/// Sourcemaps written on Windows carry backslashes; every path Biskit reports uses forward
-/// slashes, so the two have to meet somewhere.
+/// Sourcemaps written on Windows carry backslashes.
 pub fn normalize(path: &str) -> String {
     let replaced = path.replace('\\', "/");
     let trimmed = replaced
@@ -669,8 +627,6 @@ mod tests {
         );
     }
 
-    /// A rojo version that names a directory instance by the directory leaves the init file
-    /// itself unmentioned, and the agent holding the file path should still get an answer.
     #[test]
     fn an_init_file_falls_back_to_the_directory_that_owns_it() {
         let map = fixture();

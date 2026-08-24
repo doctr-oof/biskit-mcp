@@ -13,10 +13,6 @@ use crate::memory::MemoryStore;
 use crate::project::{self, Project};
 
 /// Everything a confused caller needs to tell "no matches" from "nothing is running".
-///
-/// `find_symbol` answering with nothing has three very different causes, and none of them is
-/// visible from the empty result: the project may genuinely lack the symbol, the sourcemap may be
-/// missing or stale, or the language server may have died. Each is reported here.
 #[derive(Debug, Clone, Serialize)]
 pub struct Status {
     pub biskit_version: &'static str,
@@ -52,18 +48,13 @@ pub struct LanguageServerStatus {
     pub repository: String,
     pub platform: &'static str,
     pub roblox_security_level: &'static str,
-    /// Absent when nothing has been downloaded yet. Reporting never triggers acquisition.
+    /// Absent when nothing has been downloaded yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
     pub request_timeout_ms: u64,
 }
 
 /// Where the carpenter fork's `shared("Name")` require stands for this project.
-///
-/// The two halves can disagree, and neither one says so on its own: the language server resolves
-/// `shared()` with no switch to turn it off, while Biskit's require graph resolves it only when
-/// `project.shared_require` is on and only when the pinned server release is new enough for the two
-/// answers to describe the same project.
 #[derive(Debug, Clone, Serialize)]
 pub struct SharedRequireStatus {
     /// Whether the require graph counts `shared("Name")` calls as dependency edges.
@@ -83,8 +74,7 @@ pub struct SourcemapStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age_seconds: Option<u64>,
     pub watched: bool,
-    /// True when a Luau file has been written since the sourcemap was generated, which makes every
-    /// DataModel-typed answer suspect until it is regenerated.
+    /// True when a Luau file has been written since the sourcemap was generated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale: Option<bool>,
     /// The file that makes it stale, so the claim can be checked rather than taken on faith.
@@ -144,8 +134,6 @@ pub async fn collect(
             binary: acquire::installed_binary(&settings.lsp).map(|path| path.display().to_string()),
             request_timeout_ms: settings.lsp.request_timeout_ms,
         },
-        // Memory-only mode loads no sourcemap, so reporting on one would be advice about a file
-        // that could not matter here, and the staleness sweep would walk the project for nothing.
         sourcemap: match memory_only {
             true => None,
             false => sourcemap_status(handle, settings).await,
@@ -188,11 +176,6 @@ fn shown_path(project: &Project, path: &Path) -> String {
     project::normalize_separators(path.strip_prefix(project.root()).unwrap_or(path))
 }
 
-/// Every leaf of `current` that differs from `defaults`, keyed by its dotted path.
-///
-/// Diffing against the defaults rather than reading the settings files back means an override set
-/// in `settings.local.yml`, in an environment, or by a merge is reported the same way as one
-/// written in `settings.yml`: what is reported is what is in effect.
 fn collect_overrides(
     current: &Value,
     defaults: &Value,
@@ -223,7 +206,6 @@ fn collect_overrides(
 fn shared_require_status(settings: &Settings) -> SharedRequireStatus {
     let graph_edges = settings.project.shared_require;
     let language_server = match parsed_version(&settings.lsp.version) {
-        // A repository Biskit does not pin cannot be judged by its version number.
         _ if settings.lsp.repository != crate::config::DEFAULT_LSP_REPOSITORY => "unknown",
         Some(version) if version >= crate::config::FIRST_SHARED_REQUIRE_VERSION => "supported",
         Some(_) => "unsupported",
@@ -243,7 +225,6 @@ fn shared_require_status(settings: &Settings) -> SharedRequireStatus {
     }
 }
 
-/// `v0.2.0` and `0.2.0` alike, as the triple they compare by. Anything else is not judged.
 fn parsed_version(value: &str) -> Option<(u32, u32, u32)> {
     let mut parts = value.trim_start_matches('v').split('.');
     let mut next = || parts.next()?.parse::<u32>().ok();
@@ -298,12 +279,9 @@ async fn sourcemap_status(
     })
 }
 
-/// The most recently written Luau file in the project, and when it was written.
 async fn newest_source(handle: &LanguageServerHandle) -> Option<(PathBuf, SystemTime)> {
     let files = handle.resolve_luau_files(None).await.ok()?;
 
-    // One blocking task for the whole sweep: a stat per file, awaited individually, would suspend
-    // and resume the task once per file in the project for an answer nothing waits on twice.
     tokio::task::spawn_blocking(move || {
         files
             .into_iter()

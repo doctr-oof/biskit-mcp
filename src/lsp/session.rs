@@ -24,11 +24,6 @@ use crate::project::Project;
 const LUAU_LANGUAGE_ID: &str = "luau";
 const SOURCEMAP_POLL_INTERVAL: Duration = Duration::from_millis(1_500);
 
-/// Size and modification time of a file as of the last time it was read.
-///
-/// Comparing this against the file on disk decides whether the body has to be read at all. Within
-/// one agent session the same files are visited over and over and almost never change between
-/// visits, so the read that used to happen on every call is the read worth avoiding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileStamp {
     modified: std::time::SystemTime,
@@ -38,9 +33,7 @@ struct FileStamp {
 struct OpenDocument {
     version: i64,
     content: Arc<str>,
-    /// Encoded once per document rather than per request against it.
     uri: Arc<str>,
-    /// Absent when the platform did not report a modification time, which forces the full read.
     stamp: Option<FileStamp>,
 }
 
@@ -51,7 +44,6 @@ pub struct OpenFile {
     pub uri: Arc<str>,
 }
 
-/// What has to be sent to the server after the document map has been updated.
 enum Sync {
     Opened,
     Changed(i64),
@@ -99,7 +91,6 @@ impl Session {
             .initialize(project, &configuration, settings)
             .await?;
 
-        // The watcher holds a weak reference so it never keeps a dead session alive.
         let watcher = spawn_sourcemap_watch(project, settings, Arc::downgrade(&session));
         *session
             .sourcemap_watch
@@ -193,10 +184,6 @@ impl Session {
     }
 
     /// Makes sure the server holds the current text of `path`, and hands back that text.
-    ///
-    /// The body is only read from disk when the file's size or modification time differs from the
-    /// stamp taken the last time it was read. The notification is written after the document map
-    /// lock is released, so nothing waits on the stdin mutex while holding it.
     pub async fn ensure_open(&self, path: &Path) -> Result<OpenFile> {
         let stamp = file_stamp(path).await;
 
@@ -215,7 +202,6 @@ impl Session {
         let (file, sync) = {
             let mut documents = self.documents.lock().await;
             match documents.get_mut(path) {
-                // A stamp that moved without the bytes moving still means nothing to send.
                 Some(open) if open.content == content => {
                     open.stamp = stamp;
                     return Ok(open.as_file());
@@ -269,7 +255,6 @@ impl Session {
             }
         };
 
-        // A document the server was never told about must not stay in the map claiming otherwise.
         if let Err(error) = sent {
             self.documents.lock().await.remove(path);
             return Err(error);
@@ -278,9 +263,6 @@ impl Session {
     }
 
     /// The symbol tree of `path`, alongside the text it was built from.
-    ///
-    /// The text comes back because `ensure_open` has already produced it: every caller needs both,
-    /// and asking for them separately read the same file from disk twice.
     pub async fn document_symbols(&self, path: &Path) -> Result<(Vec<SymbolNode>, Arc<str>)> {
         let file = self.ensure_open(path).await?;
         let response: Option<DocumentSymbolResponse> = self
@@ -498,7 +480,6 @@ async fn drain_events(
     }
 }
 
-/// luau-lsp only reloads the sourcemap when told; poll its mtime and forward changes.
 fn spawn_sourcemap_watch(
     project: &Project,
     settings: &Settings,
@@ -575,20 +556,12 @@ impl LanguageServerHandle {
         }
     }
 
-    /// The symbol tree of `path` and the text it was built from, served from the persistent index
-    /// when the file has not moved since it was last indexed.
-    ///
-    /// The body still has to be read, because every caller turns it into a `LineIndex`, but a read
-    /// of a file already in the page cache is not a round trip through the language server's
-    /// single stdio pipe, which is what a project-wide sweep pays for once per candidate file.
+    /// The symbol tree of `path` and the text it was built from, served from the persistent index when the file has not moved since it was last indexed.
     pub async fn document_symbols(
         &self,
         session: &Session,
         path: &Path,
     ) -> Result<(Vec<SymbolNode>, Arc<str>)> {
-        // The stamp is taken once, before the tree is produced, so a file written during the
-        // request is stored under the stamp of the text the tree actually describes, and the next
-        // session sees a miss rather than a tree that no longer matches the file.
         let key = match self.symbols.enabled() {
             true => self.project.relativize(path).ok(),
             false => None,
@@ -601,9 +574,6 @@ impl LanguageServerHandle {
         if let (Some(key), Some(stamp)) = (&key, stamp)
             && let Some(cached) = self.symbols.get(key, stamp).await
             && let Ok(content) = tokio::fs::read_to_string(path).await
-            // Stamped again after the read, because a file written between the two would pair a
-            // stored tree with text it does not describe, and every line the answer names would
-            // be off by whatever the write moved.
             && SourceStamp::of(path).await == Some(stamp)
         {
             return Ok((cached, Arc::from(content)));
@@ -611,9 +581,6 @@ impl LanguageServerHandle {
 
         let (symbols, content) = session.document_symbols(path).await?;
         if let (Some(key), Some(stamp)) = (&key, stamp)
-            // Stored only when the file held still while the tree was being built. Storing a tree
-            // under the stamp of text it does not describe survives on disk, so a later checkout
-            // back to that text would be answered from it, confidently and wrongly.
             && SourceStamp::of(path).await == Some(stamp)
         {
             self.symbols.put(key, stamp, &symbols).await;
@@ -651,14 +618,6 @@ impl LanguageServerHandle {
     }
 
     /// Starts the language server in the background so the first tool call does not pay for it.
-    ///
-    /// Acquisition, `initialize`, definition file loading and the server's own workspace indexing
-    /// add up to seconds at exactly the moment an agent is trying to do its first piece of work.
-    /// The session mutex means a real caller that arrives mid-startup waits on this attempt rather
-    /// than beginning a second one, so the only cost is starting a server that is never used.
-    ///
-    /// Failures are logged and dropped: the first real tool call runs the same path and reports
-    /// the failure properly, with its hint, to the caller who asked for it.
     pub fn warm_up(self: &Arc<Self>) {
         if self.settings.project.memory_only {
             return;
@@ -675,9 +634,6 @@ impl LanguageServerHandle {
     }
 
     /// The state of the session without waiting for it.
-    ///
-    /// A status report that blocked behind a server which is mid-startup would be answering the
-    /// question it exists to answer only once the answer stopped being interesting.
     pub fn state(&self) -> ServerState {
         if self.settings.project.memory_only {
             return ServerState::Disabled;
@@ -695,14 +651,9 @@ impl LanguageServerHandle {
     }
 
     pub async fn stop(&self) {
-        // Whatever the last sweep indexed but did not reach the flush threshold with is written
-        // here, so a short session still leaves the next one warmer than it found things.
         self.symbols.flush().await;
 
         let mut guard = self.session.lock().await;
-        // Shut down through the `Arc` rather than requiring sole ownership of it. Demanding
-        // ownership meant that any tool call still holding a clone silently skipped the shutdown,
-        // leaving the old luau-lsp process resident with every document it had open.
         if let Some(existing) = guard.take() {
             existing.shutdown().await;
         }
@@ -713,9 +664,6 @@ impl LanguageServerHandle {
     }
 
     /// Every `.luau` and `.lua` file under `base`, or under the project root when `base` is absent.
-    ///
-    /// Taking a base means a query scoped to one directory walks that directory instead of walking
-    /// the whole project and discarding everything outside it.
     pub async fn resolve_luau_files(&self, base: Option<&Path>) -> Result<Vec<PathBuf>> {
         let root = base.unwrap_or(self.project.root()).to_path_buf();
         let settings = self.settings.project.clone();
@@ -763,8 +711,6 @@ pub fn ensure_luau_file(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// A project shaped like a real repository: a fat `.git`, a `.biskit`, a vendored tree, and
-    /// Luau spread over two directories.
     fn fixture() -> (tempfile::TempDir, Project) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

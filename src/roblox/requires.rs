@@ -13,10 +13,8 @@ use crate::config::Settings;
 use crate::lines::LineIndex;
 use crate::project::{self, Project};
 
-/// Methods whose first string argument names a child of the receiver.
 const CHILD_BY_NAME_METHODS: [&str; 3] = ["GetService", "WaitForChild", "FindFirstChild"];
 
-/// Extensions a string require can land on, in the order Luau would try them.
 const MODULE_SUFFIXES: [&str; 4] = [".luau", ".lua", "/init.luau", "/init.lua"];
 
 /// Which way an edge is followed.
@@ -43,10 +41,6 @@ impl Direction {
 }
 
 /// A require Biskit could not resolve to a file, and why.
-///
-/// Dropping these would make the graph look complete when it is not. A module reached only through
-/// `require(modules[name])` has a real dependency that no static pass can see, and an agent
-/// deciding whether an edit is safe needs to know that rather than to be reassured.
 #[derive(Debug, Clone, Serialize)]
 pub struct UnresolvedRequire {
     pub line: u32,
@@ -77,7 +71,7 @@ pub struct ReachedModule {
     pub relative_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_path: Option<String>,
-    /// Hops from the module the walk started at. 1 is a direct edge.
+    /// Hops from the module the walk started at.
     pub depth: u32,
     /// The require that reached it, on the first hop that did.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,10 +84,6 @@ pub struct ReachedModule {
 }
 
 /// What the file set looked like when a graph was built.
-///
-/// Rebuilding means reading every Luau file in the project, where checking whether a rebuild is
-/// needed is one stat per file. Comparing the two is what makes a second call to `get_require_graph`
-/// cost almost nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphStamp {
     sourcemap: Option<(SystemTime, u64)>,
@@ -132,8 +122,7 @@ impl RequireGraph {
             .copied()
     }
 
-    /// Every module within `depth` hops of `start`, breadth first so the shallowest route to each
-    /// one is the route reported.
+    /// Every module within `depth` hops of `start`, breadth first so the shallowest route to each one is the route reported.
     pub fn walk(
         &self,
         start: usize,
@@ -166,8 +155,6 @@ impl RequireGraph {
                         instance_path: module.instance_path.clone(),
                         depth: hop,
                         via: expression,
-                        // On a direct edge the requiring file is the module asked about, so
-                        // repeating it would say nothing.
                         from: (hop > 1).then(|| self.modules[current].relative_path.clone()),
                         line,
                     });
@@ -193,8 +180,6 @@ impl RequireGraph {
                 .iter()
                 .map(|edge| (edge.target, Some(edge.line), Some(edge.expression.clone())))
                 .collect(),
-            // The requiring side owns the text of the require, so a dependent is reported with the
-            // require it wrote rather than with nothing.
             Direction::Dependents => self.modules[index]
                 .dependents
                 .iter()
@@ -214,9 +199,6 @@ impl RequireGraph {
     }
 
     /// Require cycles, each reported as the loop it closes.
-    ///
-    /// A cycle is legal Luau and often deliberate, but it is also how a module ends up holding a
-    /// half-initialised table at runtime, and it is invisible to every other tool Biskit has.
     pub fn cycles(&self, limit: usize) -> (Vec<Vec<String>>, bool) {
         const WHITE: u8 = 0;
         const GREY: u8 = 1;
@@ -230,8 +212,6 @@ impl RequireGraph {
             if colour[root] != WHITE {
                 continue;
             }
-            // An explicit stack: a deep dependency chain is common and the recursion depth would
-            // otherwise be the length of the longest chain in the project.
             let mut path: Vec<usize> = Vec::new();
             let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
             colour[root] = GREY;
@@ -303,7 +283,7 @@ pub struct UnresolvedEntry {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphAnswer {
-    /// The module the graph was centred on. Absent for a project-wide answer.
+    /// The module the graph was centred on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relative_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -493,8 +473,6 @@ fn build(
     let mut index: HashMap<String, usize> = HashMap::with_capacity(files.len());
     let mut sources: Vec<(PathBuf, String)> = Vec::with_capacity(files.len());
 
-    // Two passes: every module has to exist before any edge can point at it, or a require written
-    // before its target was scanned would resolve to nothing for no reason but ordering.
     for path in files {
         let Ok(relative) = project.relativize(&path) else {
             continue;
@@ -516,9 +494,6 @@ fn build(
 
     let mut aliases = AliasCache::new(project);
 
-    // The index is keyed by file stem across the whole project, so it has to exist before any call
-    // site is resolved. It is built from the same file list the modules were, which is what keeps
-    // it in step with what the graph can actually point at.
     let shared = settings.project.shared_require.then(|| {
         let paths: Vec<String> = modules
             .iter()
@@ -536,7 +511,6 @@ fn build(
             .first()
             .copied();
 
-        // A file that binds its own `shared` is not calling the global the framework installed.
         let scan_shared =
             shared.is_some() && !environment.contains_key(shared_require::GLOBAL_NAME);
 
@@ -602,27 +576,18 @@ enum Resolved {
     File(String),
 }
 
-/// Which spelling of a require a call site used.
 enum CallKind {
     Require,
-    /// The fork resolves `shared()` only when its argument is a constant string, so anything else
-    /// carries no name to look up and is reported unresolved rather than dropped.
     Shared(Option<String>),
 }
 
 struct RequireCall {
     line: u32,
-    /// Byte offset of the call, so calls found by two passes can be reported in written order.
     offset: usize,
     expression: String,
     kind: CallKind,
 }
 
-/// Every require in a file, with the argument text as written.
-///
-/// `shared("Name")` is the Carpenter fork's string require and is a real dependency wherever the
-/// framework providing it is in play, so it is scanned alongside `require` unless the caller has
-/// turned it off.
 fn find_calls(blanked: &str, lines: &LineIndex<'_>, include_shared: bool) -> Vec<RequireCall> {
     let mut found = find_requires(blanked, lines);
     if include_shared {
@@ -632,7 +597,6 @@ fn find_calls(blanked: &str, lines: &LineIndex<'_>, include_shared: bool) -> Vec
     found
 }
 
-/// Every `require(...)` in a file, with the argument text as written.
 fn find_requires(blanked: &str, lines: &LineIndex<'_>) -> Vec<RequireCall> {
     let bytes = blanked.as_bytes();
     let mut found = Vec::new();
@@ -664,7 +628,6 @@ fn find_requires(blanked: &str, lines: &LineIndex<'_>) -> Vec<RequireCall> {
                 }
                 None => continue,
             },
-            // `require "@Packages/Promise"` is a call without parentheses.
             b'"' | b'\'' => {
                 let rest = &blanked[cursor..];
                 let quote = bytes[cursor] as char;
@@ -689,12 +652,6 @@ fn find_requires(blanked: &str, lines: &LineIndex<'_>) -> Vec<RequireCall> {
     found
 }
 
-/// Every `shared("Name")` in a file.
-///
-/// The fork matches an `AstExprCall` whose callee is the `shared` **global** and whose single
-/// argument is a string literal. This is a text pass rather than a parse, so the two conditions it
-/// can still check are enforced here: a qualified `Thing.shared(...)` is not the global, and neither
-/// is a `shared` the file has bound locally.
 fn find_shared_requires(blanked: &str, lines: &LineIndex<'_>) -> Vec<RequireCall> {
     let bytes = blanked.as_bytes();
     let name = shared_require::GLOBAL_NAME;
@@ -732,7 +689,6 @@ fn find_shared_requires(blanked: &str, lines: &LineIndex<'_>) -> Vec<RequireCall
                 }
                 None => continue,
             },
-            // `shared "Foo"` is a call without parentheses, and the fork matches it too.
             b'"' | b'\'' => {
                 let rest = &blanked[cursor..];
                 let quote = bytes[cursor] as char;
@@ -758,10 +714,6 @@ fn find_shared_requires(blanked: &str, lines: &LineIndex<'_>) -> Vec<RequireCall
     found
 }
 
-/// The value of `expression` when it is one string literal and nothing else.
-///
-/// Anything else — a concatenation, a variable, a second argument — is what the fork declines to
-/// match, so it has to be distinguishable from a literal here rather than resolved on a guess.
 fn string_literal(expression: &str) -> Option<String> {
     let chars: Vec<char> = expression.chars().collect();
     let quote = *chars.first()?;
@@ -798,7 +750,6 @@ fn string_literal(expression: &str) -> Option<String> {
     None
 }
 
-/// The span inside a balanced parenthesis pair, and the offset just past its close.
 fn balanced(bytes: &[u8], open: usize) -> Option<(std::ops::Range<usize>, usize)> {
     let mut depth = 0usize;
     let mut index = open;
@@ -836,12 +787,6 @@ fn local_pattern() -> &'static Regex {
     })
 }
 
-/// Single-name `local` bindings, in the order they are written.
-///
-/// This is a text pass, not a scope analysis: a name bound twice keeps its last binding, and a
-/// binding inside a function body is treated as if it were at the top of the file. Roblox modules
-/// bind their services and their package folders once, at the top, which is the shape that matters
-/// here, and a wrong binding surfaces as an unresolved require rather than as a wrong edge.
 fn local_bindings(blanked: &str) -> HashMap<String, String> {
     let mut bindings = HashMap::new();
     for capture in local_pattern().captures_iter(blanked) {
@@ -861,11 +806,6 @@ struct Chain {
     steps: Vec<Step>,
 }
 
-/// Parses an instance expression into a head and the traversal applied to it.
-///
-/// Anything the parser cannot account for fails the whole chain rather than being skipped: a
-/// dropped step would silently point the answer at the wrong instance, which is worse than saying
-/// the require could not be resolved.
 fn parse_chain(expression: &str) -> Result<Chain, String> {
     let chars: Vec<char> = expression.chars().collect();
     let mut index = 0;
@@ -935,7 +875,6 @@ fn read_identifier(chars: &[char], from: usize) -> (String, usize) {
     (identifier, index)
 }
 
-/// The first string literal of a call, and the offset past the call's closing parenthesis.
 fn read_call_argument(chars: &[char], from: usize) -> (Option<String>, usize) {
     let mut index = from;
     while index < chars.len() && chars[index].is_whitespace() {
@@ -970,8 +909,6 @@ fn read_call_argument(chars: &[char], from: usize) -> (Option<String>, usize) {
             }
             character if character.is_whitespace() || character == ',' => index += 1,
             _ => {
-                // An argument that is not a literal, such as `:WaitForChild(name)`, names a child
-                // only at runtime.
                 if literal.is_none() {
                     only_literal = false;
                 }
@@ -1025,10 +962,6 @@ fn read_string(chars: &[char], from: usize, quote: char) -> (String, usize) {
     (text, index)
 }
 
-/// Resolves a `shared("Name")` call the way the language server fork resolves it.
-///
-/// The reasons here are worded to match what the fork's own diagnostic says about the same line, so
-/// an agent reading both does not have to work out whether they are describing one problem or two.
 fn resolve_shared(
     name: Option<&str>,
     index: Option<&SharedIndex>,
@@ -1085,11 +1018,6 @@ fn resolve(
     }
 }
 
-/// How many local bindings deep the head of a chain is followed.
-///
-/// `local packages = script.Parent.Packages` then `require(packages.Janitor)` is one hop, and
-/// chains of two or three are ordinary. The limit is what stops a binding that refers to itself
-/// from looping.
 const MAX_BINDING_HOPS: usize = 8;
 
 fn resolve_instance(
@@ -1114,9 +1042,6 @@ fn resolve_instance(
             .ok_or_else(|| "the sourcemap has no Workspace".to_string())?,
         head => match environment.get(head) {
             Some(bound) => resolve_instance(bound, environment, sourcemap, script_node, hops + 1)?,
-            // A service written without being bound first, as in `game.ReplicatedStorage`, reaches
-            // here as a bare name. Accepting it only when the DataModel really has such a child
-            // keeps an ordinary local from being mistaken for one.
             None => sourcemap
                 .child(sourcemap.root(), head)
                 .ok_or_else(|| format!("{head} is not a known instance in this file"))?,
@@ -1142,8 +1067,6 @@ fn resolve_instance(
     Ok(current)
 }
 
-/// Resolves a Luau string require, which is either a `.luaurc` alias or a path relative to the
-/// requiring file.
 fn resolve_string_require(
     literal: &str,
     path: &Path,
@@ -1183,8 +1106,6 @@ fn resolve_string_require(
     Err(format!("{literal} does not name a file on disk"))
 }
 
-/// Removes `.` and `..` without touching the filesystem, so a path assembled from a relative
-/// require can still be stripped of the project root.
 fn normalize_path(path: &Path) -> PathBuf {
     let mut cleaned = PathBuf::new();
     for component in path.components() {
@@ -1199,11 +1120,6 @@ fn normalize_path(path: &Path) -> PathBuf {
     cleaned
 }
 
-/// `.luaurc` aliases, resolved per directory and remembered for the rest of the build.
-///
-/// Every file in a package directory shares the same nearest `.luaurc`, and a project with a
-/// vendored `Packages` tree has thousands of them, so reading it once per directory rather than
-/// once per require is the difference that matters.
 struct AliasCache {
     root: PathBuf,
     by_directory: HashMap<PathBuf, HashMap<String, PathBuf>>,
@@ -1244,7 +1160,6 @@ fn read_aliases(directory: &Path) -> HashMap<String, PathBuf> {
     let Ok(raw) = std::fs::read_to_string(directory.join(".luaurc")) else {
         return HashMap::new();
     };
-    // `.luaurc` is JSON with comments allowed, which serde_json will not accept.
     let stripped: String = raw
         .lines()
         .map(|line| match line.trim_start().starts_with("//") {
@@ -1267,10 +1182,6 @@ fn read_aliases(directory: &Path) -> HashMap<String, PathBuf> {
 }
 
 /// Blanks every comment, keeping every byte offset and every line break where it was.
-///
-/// Requires are found by scanning text, and a commented-out require is not a dependency. Deleting
-/// the comments outright would move every offset after them, so the line a require is reported on
-/// would drift from the line it is written on.
 pub fn blank_comments(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut out = bytes.to_vec();
@@ -1327,7 +1238,6 @@ pub fn blank_comments(source: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| source.to_string())
 }
 
-/// The number of `=` signs in a long bracket opening at `index`, if one opens there.
 fn long_bracket(bytes: &[u8], index: usize) -> Option<usize> {
     if bytes.get(index) != Some(&b'[') {
         return None;
@@ -1342,7 +1252,6 @@ fn long_bracket(bytes: &[u8], index: usize) -> Option<usize> {
     }
 }
 
-/// Replaces a span with spaces, leaving line breaks so line numbers survive.
 fn blank(out: &mut [u8], from: usize, to: usize) {
     let end = to.min(out.len());
     for byte in &mut out[from..end] {
@@ -1378,7 +1287,6 @@ mod tests {
         }]
     }"#;
 
-    /// A project whose modules require each other every way a Roblox module does.
     fn fixture() -> (tempfile::TempDir, Project, RequireGraph) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1486,8 +1394,6 @@ mod tests {
             .expect("the dynamic index is reported");
         assert!(dynamic.1.contains("not a literal name"));
 
-        // A folder is a real instance and a real answer, and saying so is more use than saying
-        // nothing resolved.
         let folder = reasons
             .iter()
             .find(|(expression, _)| expression.contains("Assets"))
@@ -1513,7 +1419,6 @@ mod tests {
         );
     }
 
-    /// The whole point of the stamp is that a second call reads no file bodies at all.
     #[test]
     fn an_unchanged_project_reuses_the_graph_it_already_built() {
         let (dir, project, graph) = fixture();
@@ -1562,8 +1467,6 @@ mod tests {
         assert_eq!(found[0].line, 4);
     }
 
-    /// A `--` inside a string is not a comment, and blanking from it would swallow the require
-    /// that follows on the same line.
     #[test]
     fn a_double_dash_inside_a_string_does_not_start_a_comment() {
         let source = "local separator = \"--\" local m = require(script.Real)\n";
@@ -1679,7 +1582,6 @@ mod tests {
         ]
     }"#;
 
-    /// A project written the way a framework that installs `shared` as a require writes one.
     fn shared_fixture(shared_require: bool) -> (tempfile::TempDir, RequireGraph) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1753,7 +1655,6 @@ mod tests {
         );
     }
 
-    /// The nearest sibling wins, so an unqualified name resolves within the requiring subtree.
     #[test]
     fn an_unqualified_shared_name_resolves_to_the_nearest_candidate() {
         let (_dir, graph) = shared_fixture(true);
@@ -1791,8 +1692,6 @@ mod tests {
         );
     }
 
-    /// `shared` is still a plain table, and the fork keeps it typed as one. Reading or writing a
-    /// field on it is not a require and must not surface as one.
     #[test]
     fn indexing_the_shared_table_is_not_a_require() {
         let source = "shared.someFlag = true\nlocal held = shared.cache\nlocal n = shared[key]\n";
@@ -1801,7 +1700,6 @@ mod tests {
         assert!(find_shared_requires(&blanked, &lines).is_empty());
     }
 
-    /// `shared "Foo"` parses to the same call node as `shared("Foo")`, so the fork matches it.
     #[test]
     fn a_call_without_parentheses_is_still_a_shared_require() {
         let (_dir, graph) = shared_fixture(true);

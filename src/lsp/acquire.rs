@@ -50,9 +50,6 @@ pub fn install_root(settings: &LspSettings) -> Result<PathBuf> {
 }
 
 /// The language server binary already on disk, without acquiring one.
-///
-/// Reporting on an install must never trigger a download: a status call that spends thirty seconds
-/// fetching a release is answering a different question than the one it was asked.
 pub fn installed_binary(settings: &LspSettings) -> Option<PathBuf> {
     if let Some(path) = &settings.binary_path {
         return path.is_file().then(|| path.clone());
@@ -151,7 +148,6 @@ fn ensure_binary(settings: &LspSettings, root: &Path) -> Result<PathBuf> {
     Ok(binary)
 }
 
-/// Support files are unversioned and unhashed upstream, so a failure here is not fatal.
 fn ensure_support_file(url: &str, root: &Path, file_name: &str) -> Option<PathBuf> {
     let destination = root.join(file_name);
     if destination.is_file() {
@@ -183,7 +179,6 @@ pub fn download(url: &str, allowed_hosts: &[&str]) -> Result<Vec<u8>> {
         .call()
         .with_context(|| format!("request failed: {url}"))?;
 
-    // Redirects are followed internally, so every hop has to clear the allowlist too.
     match response.get_redirect_history() {
         Some(history) => {
             for hop in history {

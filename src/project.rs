@@ -19,7 +19,6 @@ const RELATIVE_PATH_HINT: &str = "pass a path relative to the project root, such
 const ESCAPED_ROOT_HINT: &str = "Biskit only reads inside the project root; drop the leading \
                                  \"..\" segments";
 
-/// Markers consulted only when no ancestor holds a `.biskit` directory.
 const FALLBACK_MARKERS: [&str; 2] = [".git", "default.project.json"];
 
 /// Every entry that marks a project root, in the order discovery considers them.
@@ -129,13 +128,6 @@ impl Project {
 }
 
 /// The one walker every project traversal is built from.
-///
-/// Both the file tools and the Luau file scan need the same exclusions, and when they were
-/// configured separately they drifted: the scan descended into `.git`, which on a real repository
-/// is tens of thousands of stat calls that can never yield a `.luau` file.
-///
-/// `ignore` detects `.git` only so it can locate gitignore files; it never excludes the directory
-/// from traversal on its own, so the exclusion has to be stated here.
 pub fn walk_builder(base: &Path, settings: &crate::config::ProjectSettings) -> Result<WalkBuilder> {
     let mut builder = WalkBuilder::new(base);
     builder
@@ -157,17 +149,10 @@ pub fn walk_builder(base: &Path, settings: &crate::config::ProjectSettings) -> R
     Ok(builder)
 }
 
-/// Turns `project.ignored_paths` into exclusions.
-///
-/// `WalkBuilder::add_ignore` takes the path of an ignore *file*, not a pattern, so passing the
-/// patterns to it excluded nothing at all. An override glob prefixed with `!` is the API that
-/// carries gitignore syntax, which is what the setting has always been documented as taking.
 fn build_overrides(base: &Path, patterns: &[String]) -> Result<Override> {
     let mut overrides = OverrideBuilder::new(base);
     for pattern in patterns {
         let negated = match pattern.strip_prefix('!') {
-            // A leading "!" in gitignore syntax re-includes, which for a list named
-            // "ignored_paths" would invert the caller's stated intent. Take it literally instead.
             Some(rest) => rest,
             None => pattern.as_str(),
         };
@@ -202,12 +187,6 @@ pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// Walks up from `start` and returns the ancestor that owns the project.
-///
-/// Agents launch MCP servers with a working directory that is usually, but not always, the project
-/// root, so the ascent lets a nested working directory still resolve to the right project.
-///
-/// A `.biskit` directory anywhere in the chain wins over a nearer `.git` or `default.project.json`,
-/// because it is the only marker that states the directory is deliberately a Biskit project.
 pub fn discover_root(start: &Path) -> Option<PathBuf> {
     let start = canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
     let nearest = |markers: &[&str]| {

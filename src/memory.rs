@@ -240,13 +240,6 @@ impl MemoryStore {
         Ok(resolved)
     }
 
-    /// Removes the directories a deleted memory left behind, as far as it can get.
-    ///
-    /// Tidying is not part of the outcome the caller asked for: a directory handle held by a cloud
-    /// sync client, a search indexer, or a virus scanner fails the removal with a permission error
-    /// even when the directory is empty, and reporting that as a failed delete would describe a
-    /// file that is already gone as still there. A directory left standing holds no memories and
-    /// `list` does not report it.
     fn prune_empty_dirs(&self, removed: &Path) {
         let memories_root = self.project.memories_dir();
         let mut cursor = removed.parent().map(Path::to_path_buf);
@@ -274,12 +267,6 @@ fn reference_matches(reference: &str, from_stem: &str) -> bool {
     stem(reference) == from_stem
 }
 
-/// Rejects a replacement that names a capture group the pattern does not define.
-///
-/// `$1` and `$name` are expansions, and an expansion the pattern cannot fill is substituted with
-/// the empty string rather than refused, so a dollar sign meant literally silently swallows the
-/// word that follows it. Callers writing prose into a memory hit this without ever asking for a
-/// capture group.
 fn validate_replacement(regex: &Regex, replacement: &str) -> Result<()> {
     let bytes = replacement.as_bytes();
     let mut cursor = 0;
@@ -292,7 +279,6 @@ fn validate_replacement(regex: &Regex, replacement: &str) -> Result<()> {
         }
 
         let (reference, next) = match bytes.get(after) {
-            // An unclosed brace is not an expansion at all, so it stands as written.
             Some(b'{') => match replacement[after + 1..].find('}') {
                 Some(end) => (&replacement[after + 1..after + 1 + end], after + end + 2),
                 None => (&replacement[after..after], after),

@@ -11,11 +11,6 @@ use crate::lsp::protocol::Severity;
 use crate::lsp::queries::{ModuleApi, SymbolQuery};
 use crate::lsp::session::LanguageServerHandle;
 
-/// Services whose contents only ever run on one side of the network boundary.
-///
-/// Getting this wrong in either direction is one of the more expensive mistakes an agent can make
-/// in a Roblox codebase, because nothing fails at edit time: a client module that requires a
-/// server one type-checks perfectly and is simply not there at runtime.
 const SERVER_ROOTS: [&str; 4] = [
     "ServerScriptService",
     "ServerStorage",
@@ -61,8 +56,7 @@ pub struct ModuleContext {
     /// Its public surface, when it is a ModuleScript.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api: Option<ModuleApi>,
-    /// How many diagnostics it currently carries, by severity. Always present: an empty map means
-    /// the file is clean, where an absent one would read as "not checked".
+    /// How many diagnostics it currently carries, by severity.
     pub diagnostics: BTreeMap<String, usize>,
     pub sourcemap: SourcemapReference,
     /// Anything that made the answer less complete than it looks.
@@ -70,8 +64,7 @@ pub struct ModuleContext {
     pub notes: Vec<String>,
 }
 
-/// Answers, in one call, the four to six questions an agent asks when it opens a module it has not
-/// seen before.
+/// Answers, in one call, the four to six questions an agent asks when it opens a module it has not seen before.
 pub async fn module_context(
     index: &RobloxIndex,
     handle: &LanguageServerHandle,
@@ -123,8 +116,6 @@ pub async fn module_context(
     };
 
     let query = SymbolQuery::new(handle);
-    // A file with no public surface, such as a LocalScript, is a fact about the module rather than
-    // a failure of the call, and the rest of the context is still worth having.
     let api = match query.module_api(&relative, max_entries).await {
         Ok(api) => Some(api),
         Err(error) => {
@@ -177,11 +168,6 @@ fn count_by_severity(
     counts
 }
 
-/// Which side of the client and server boundary a service puts code on.
-///
-/// Only the services whose meaning is unambiguous are classified. A module under a service that is
-/// not in any of the three lists is reported as `unknown` rather than guessed at, because a wrong
-/// answer here reads exactly like a right one.
 fn role_of(service: Option<&str>) -> &'static str {
     let Some(service) = service else {
         return "unknown";

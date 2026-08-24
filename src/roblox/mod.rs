@@ -16,12 +16,6 @@ use requires::RequireGraph;
 use sourcemap::Sourcemap;
 
 /// The Roblox-shaped facts about a project, held across tool calls.
-///
-/// Each of the three is expensive to produce and almost always unchanged between calls: the
-/// sourcemap is a JSON file that only rojo rewrites, the require graph is a read of every Luau
-/// file in the project, and the Roblox API is seven megabytes of type definitions and
-/// documentation. Rebuilding any of them per call would make the tools that use them too slow to
-/// reach for, which is the same as not having them.
 pub struct RobloxIndex {
     project: Project,
     settings: Settings,

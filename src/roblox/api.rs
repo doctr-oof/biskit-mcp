@@ -12,15 +12,10 @@ const MISSING_CACHE_HINT: &str = "run `biskit-mcp doctor` once, or start Biskit 
                                   memory-only mode, so the Roblox type definitions and API \
                                   documentation are downloaded into the language server cache";
 
-/// Near misses offered when a name resolves to nothing.
 const SUGGESTIONS: usize = 8;
 
-/// Enum item lists and the member lists of `Instance` descendants both run long, so a class answer
-/// is capped and says when it was.
 const DEFAULT_MAX_MEMBERS: usize = 200;
 
-/// The suffix luau-lsp gives the type that holds an enum's items, as opposed to the type of one
-/// item.
 const ENUM_CONTAINER_SUFFIX: &str = "_INTERNAL";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -36,8 +31,7 @@ pub enum MemberKind {
 pub struct ApiMember {
     pub name: String,
     pub kind: MemberKind,
-    /// The declaration exactly as the type definitions write it, which is the most compact form of
-    /// the signature there is.
+    /// The declaration exactly as the type definitions write it.
     pub declaration: String,
     pub deprecated: bool,
     /// What the deprecation says to use instead, where it says.
@@ -55,7 +49,6 @@ pub struct ApiType {
 struct RawParameter {
     #[serde(default)]
     name: String,
-    /// A key into the same document rather than prose, so it has to be looked up again.
     #[serde(default)]
     documentation: String,
 }
@@ -73,11 +66,6 @@ struct RawDoc {
 }
 
 /// The Roblox API surface Biskit already had on disk and never showed anyone.
-///
-/// Both files are downloaded for luau-lsp's own use: the type definitions are what the checker
-/// resolves `TweenService:Create` against, and the documentation dump is what it shows on hover.
-/// Parsing them here is what turns "the agent guesses the Roblox API from training data" into a
-/// lookup against the same ground truth the checker uses.
 #[derive(Debug)]
 pub struct RobloxApi {
     types: BTreeMap<String, ApiType>,
@@ -127,11 +115,9 @@ pub struct ClassAnswer {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub learn_more_link: Option<String>,
     pub members: Vec<MemberSummary>,
-    /// How many members survived `member_filter`, which is not how many the class has. Named for
-    /// what it counts, because `member_count` read as the class's own total.
+    /// How many members survived `member_filter`, which is not how many the class has.
     pub returned_count: usize,
-    /// Every member the class carries before `member_filter` narrowed them. Omitted when nothing
-    /// was filtered out, where it would only repeat `returned_count`.
+    /// Every member the class carries before `member_filter` narrowed them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_member_count: Option<usize>,
     #[serde(skip_serializing_if = "crate::json::is_false")]
@@ -142,8 +128,7 @@ pub struct ClassAnswer {
 pub struct MemberAnswer {
     pub class: String,
     pub name: String,
-    /// Not named `kind`: that key is already the discriminator of the answer itself, and a second
-    /// field by the same name would overwrite it once the two are flattened together.
+    /// Not named `kind`: that key is already the discriminator of the answer itself, and a second field by the same name would overwrite it once the two are flattened together.
     pub member_kind: MemberKind,
     pub declaration: String,
     #[serde(skip_serializing_if = "crate::json::is_false")]
@@ -190,8 +175,7 @@ pub enum Answer {
 pub struct ApiResult {
     #[serde(flatten)]
     pub answer: Answer,
-    /// Which `globalTypes` file the answer came from. A member hidden at this level is absent
-    /// rather than reported as missing, which is worth saying once per answer.
+    /// Which `globalTypes` file the answer came from.
     pub security_level: &'static str,
 }
 
@@ -206,10 +190,6 @@ pub struct ApiQuery<'a> {
 
 impl RobloxApi {
     /// Reads the cached type definitions and documentation dump.
-    ///
-    /// Never downloads: acquisition belongs to the language server's own startup, and a tool call
-    /// that quietly spent thirty seconds fetching seven megabytes would be answering a different
-    /// question than the one it was asked.
     pub fn load(settings: &LspSettings) -> Result<Self> {
         let root = acquire::install_root(settings)?;
         let security_level = settings.roblox_security_level.as_str();
@@ -331,12 +311,6 @@ impl RobloxApi {
         }
     }
 
-    /// A member is looked for on the class named and then up its ancestry, because that is where
-    /// `part:Destroy()` actually lives and asking about `BasePart.Destroy` is not a mistake.
-    ///
-    /// Documentation is not behind `include_documentation` here: a caller who named one member
-    /// asked for what it does, and the prose for a single member is a paragraph rather than the
-    /// hundreds a class listing would carry.
     fn member_answer(&self, owner: &ApiType, member_name: &str) -> Option<ApiResult> {
         let mut current = Some(owner.name.clone());
         while let Some(name) = current {
@@ -382,7 +356,6 @@ impl RobloxApi {
     }
 
     fn enum_answer(&self, rest: &str, query: &ApiQuery<'_>) -> Result<ApiResult> {
-        // `Enum.EasingStyle.Linear` names one item, which is the same answer narrowed to it.
         let (enum_name, item) = match rest.split_once('.') {
             Some((name, item)) => (name, Some(item)),
             None => (rest, None),
@@ -465,7 +438,6 @@ impl RobloxApi {
     fn parameter_docs(&self, doc: &RawDoc) -> Vec<ParameterDoc> {
         doc.params
             .iter()
-            // `self` is the receiver of a method call, not an argument the caller writes.
             .filter(|parameter| parameter.name != "self")
             .map(|parameter| ParameterDoc {
                 name: parameter.name.clone(),
@@ -474,7 +446,6 @@ impl RobloxApi {
             .collect()
     }
 
-    /// Parameter and return documentation is stored as a key into the same document.
     fn resolve_reference(&self, key: &str) -> Option<String> {
         if !key.starts_with("@roblox/") {
             return Some(strip_markup(key)).filter(|text| !text.is_empty());
@@ -489,7 +460,6 @@ impl RobloxApi {
             .or_else(|| self.docs.get(&format!("@roblox/global/{name}")))
     }
 
-    /// The ancestry of a class, nearest first.
     fn ancestry(&self, name: &str) -> Vec<String> {
         let mut chain = Vec::new();
         let mut current = self.types.get(name).and_then(|found| found.extends.clone());
@@ -506,11 +476,6 @@ impl RobloxApi {
         chain
     }
 
-    /// Names close enough to what was asked to be worth offering.
-    ///
-    /// Matching runs both ways: `Humanoidd` contains no class, but a class contains it, and a typo
-    /// with one character too many is exactly the case this list exists for. Shorter names sort
-    /// first, so `Humanoid` is offered ahead of `HumanoidDescription`.
     fn suggest(&self, asked: &str) -> Vec<String> {
         let needle = asked.to_lowercase();
         let base = needle.split(['.', ':']).next().unwrap_or(&needle);
@@ -545,7 +510,6 @@ impl RobloxApi {
     }
 }
 
-/// The cache filename `acquire` gives the documentation dump, derived the same way it derives it.
 fn documentation_file_name(settings: &LspSettings) -> String {
     settings
         .documentation_url()
@@ -555,8 +519,6 @@ fn documentation_file_name(settings: &LspSettings) -> String {
         .to_string()
 }
 
-/// A documentation dump that will not parse costs the answer its prose and nothing else, so it is
-/// not worth failing the whole lookup over.
 fn read_docs(path: &PathBuf) -> HashMap<String, RawDoc> {
     let Ok(raw) = std::fs::read(path) else {
         tracing::warn!(
@@ -572,7 +534,6 @@ fn read_docs(path: &PathBuf) -> HashMap<String, RawDoc> {
     })
 }
 
-/// Splits `TweenService:Create` or `BasePart.Anchored` into its owner and its member.
 fn split_member(asked: &str) -> Option<(&str, &str)> {
     let separator = asked.rfind([':', '.'])?;
     let (owner, member) = asked.split_at(separator);
@@ -580,11 +541,6 @@ fn split_member(asked: &str) -> Option<(&str, &str)> {
     (!owner.is_empty() && !member.is_empty()).then_some((owner, member))
 }
 
-/// Parses the `declare` blocks of a `globalTypes` file.
-///
-/// luau-lsp has written these two ways across its releases, `declare class X extends Y` and the
-/// newer `declare extern type X extends Y with`, and both are accepted here so that pinning a
-/// different `lsp.version` does not silently empty this tool out.
 fn parse_definitions(
     source: &str,
 ) -> (
@@ -608,7 +564,6 @@ fn parse_definitions(
 
         if current.is_none() {
             if let Some(header) = parse_header(line) {
-                // `declare extern type X extends Y with end` declares an empty type on one line.
                 match header.empty {
                     true => {
                         types.insert(
@@ -691,7 +646,6 @@ fn parse_header(line: &str) -> Option<Header> {
     })
 }
 
-/// `@deprecated` and `@[deprecated {use = "BasePart.AssemblyRootPart"}]`.
 fn parse_attribute(attribute: &str) -> Option<(bool, Option<String>)> {
     if !attribute.contains("deprecated") {
         return None;
@@ -765,7 +719,6 @@ fn parse_metadata(payload: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     )
 }
 
-/// Roblox documentation is written with HTML in it, which reads as noise everywhere but a browser.
 fn strip_markup(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut inside = false;
@@ -862,8 +815,6 @@ end
         assert_eq!(member.deprecated_use.as_deref(), Some("Instance:Clone"));
     }
 
-    /// The attribute sits on its own line above the member it applies to, so a parser that forgot
-    /// it between lines would mark nothing deprecated at all.
     #[test]
     fn only_the_member_under_an_attribute_is_marked_deprecated() {
         let api = api();
@@ -903,8 +854,6 @@ end
         };
         assert!(class.is_service);
         assert!(!class.creatable);
-        // The chain follows every `extends` name, including one the definitions never declare a
-        // body for, because it is still where a member would have come from.
         assert_eq!(
             class.inherits,
             vec!["Instance".to_string(), "Object".to_string()]

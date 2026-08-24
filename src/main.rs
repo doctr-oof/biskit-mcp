@@ -28,67 +28,46 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the MCP server over stdio. This is the default.
     Start {
-        /// Project root. Defaults to the nearest marked ancestor of the working directory.
         #[arg(long)]
         project: Option<PathBuf>,
-        /// Use the working directory as the project root without searching upwards.
         #[arg(long, conflicts_with = "project")]
         project_from_cwd: bool,
     },
-    /// Create the .biskit folder and its default settings files.
     Init {
-        /// Project root. Defaults to the working directory.
         #[arg(long)]
         project: Option<PathBuf>,
     },
-    /// Check that the language server can be acquired and the settings parse.
     Doctor {
-        /// Project root. Defaults to the nearest marked ancestor of the working directory.
         #[arg(long)]
         project: Option<PathBuf>,
-        /// Use the working directory as the project root without searching upwards.
         #[arg(long, conflicts_with = "project")]
         project_from_cwd: bool,
     },
-    /// Register Biskit with the agents used in a project.
     Setup {
-        /// Project root. Defaults to the working directory.
         #[arg(long)]
         project: Option<PathBuf>,
-        /// Agent to configure. Repeatable. Defaults to whichever are already set up.
         #[arg(long = "client", value_enum)]
         clients: Vec<Client>,
-        /// Also add the Claude Code SessionStart hook.
         #[arg(long)]
         hooks: bool,
-        /// Which Claude Code settings file the hook is written to.
         #[arg(long, value_enum, default_value = "local")]
         hooks_target: HooksTarget,
-        /// Write `--project-from-cwd` into the generated registration, pinning the
-        /// server to this project instead of letting it search upwards.
         #[arg(long)]
         project_from_cwd: bool,
-        /// Command the agent launches. Must resolve on PATH.
         #[arg(long, default_value = setup::DEFAULT_COMMAND)]
         command: String,
-        /// Report what would change without writing anything.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Replace this executable with a published release. Touches nothing else.
     Upgrade {
-        /// Release tag to install, for example "v0.1.4". Defaults to the latest release.
         #[arg(long)]
         tag: Option<String>,
     },
-    /// Inspect and clear the caches Biskit keeps inside a project.
     Cache {
         #[command(subcommand)]
         which: CacheCommand,
     },
-    /// Emit agent hook payloads.
     Hook {
         #[command(subcommand)]
         which: HookCommand,
@@ -97,12 +76,9 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CacheCommand {
-    /// Delete the stored symbol index. The next session rebuilds it as it goes.
     Clear {
-        /// Project root. Defaults to the nearest marked ancestor of the working directory.
         #[arg(long)]
         project: Option<PathBuf>,
-        /// Use the working directory as the project root without searching upwards.
         #[arg(long, conflicts_with = "project")]
         project_from_cwd: bool,
     },
@@ -110,12 +86,9 @@ enum CacheCommand {
 
 #[derive(Subcommand)]
 enum HookCommand {
-    /// Emit SessionStart additionalContext for Claude Code.
     SessionStart {
-        /// Project root. Defaults to the nearest marked ancestor of the working directory.
         #[arg(long)]
         project: Option<PathBuf>,
-        /// Use the working directory as the project root without searching upwards.
         #[arg(long, conflicts_with = "project")]
         project_from_cwd: bool,
     },
@@ -171,7 +144,6 @@ fn main() -> Result<()> {
     }
 }
 
-/// stdout carries the JSON-RPC stream, so every log line must go to stderr.
 fn install_tracing() {
     let filter = EnvFilter::try_from_env("BISKIT_LOG")
         .unwrap_or_else(|_| EnvFilter::new("biskit=info,warn"));
@@ -182,7 +154,6 @@ fn install_tracing() {
         .init();
 }
 
-/// How a command wants its project root resolved before any explicit override is applied.
 struct RootRequest {
     explicit: Option<PathBuf>,
     discover: bool,

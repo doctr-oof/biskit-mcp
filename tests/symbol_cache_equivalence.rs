@@ -1,15 +1,4 @@
-//! Checks that the persistent symbol index changes only the cost of a symbol query, never its
-//! answer.
-//!
-//! The cache rests on one assumption: a file whose size and modification time have not moved still
-//! has the symbol tree that was stored for it. This test is what stops that from being taken on
-//! faith. It runs a project-wide `find_symbol` against a cold cache, writes the index, opens a
-//! second handle that can only have loaded the index from disk, and compares the two answers.
-//!
-//! It also checks the other half: a file edited after it was indexed must not be answered from the
-//! stored tree.
-//!
-//! Ignored by default because it needs a real checkout and a real `luau-lsp`:
+//! Checks that the persistent symbol index changes only the cost of a symbol query, never its answer.
 //!
 //! ```text
 //! BISKIT_TEST_PROJECT=/path/to/checkout cargo test --test symbol_cache_equivalence -- --ignored --nocapture
@@ -39,7 +28,6 @@ fn request(name: &str, substring: bool) -> FindSymbolRequest {
     }
 }
 
-/// Every `file::name_path` pair a result reports, flattened so two passes compare directly.
 fn flatten(result: &SymbolSearchResult) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for (file, symbols) in &result.symbols {
@@ -75,8 +63,6 @@ async fn a_warm_index_answers_exactly_what_the_language_server_did() {
     let (project, settings) = open();
     SymbolCache::clear(&project).expect("clear the cache");
 
-    // The name has to exist, because an answer of nothing is the one answer a broken cache would
-    // also give.
     let cold_handle = LanguageServerHandle::new(project.clone(), settings.clone());
     let files = cold_handle
         .resolve_luau_files(None)
@@ -113,8 +99,6 @@ async fn a_warm_index_answers_exactly_what_the_language_server_did() {
     assert!(indexed > 0, "the cold pass indexed nothing");
     cold_handle.stop().await;
 
-    // A second handle shares nothing with the first but the files on disk, so anything it answers
-    // without asking the language server came out of the index that was just written.
     let warm_handle = LanguageServerHandle::new(project.clone(), settings);
     assert_eq!(
         warm_handle.symbol_cache().entry_count().await,
@@ -162,8 +146,6 @@ async fn an_edited_file_is_not_answered_from_the_tree_stored_for_it() {
     let (project, settings) = open();
     SymbolCache::clear(&project).expect("clear the cache");
 
-    // Written into the project because the cache keys on a project-relative path; removed at the
-    // end whichever way the assertions go.
     let relative = "biskit_symbol_cache_probe.luau";
     let path = project.root().join(relative);
     std::fs::write(&path, "local ProbeBefore = 1\nreturn ProbeBefore\n").expect("write the probe");
@@ -217,7 +199,6 @@ async fn an_edited_file_is_not_answered_from_the_tree_stored_for_it() {
     outcome.expect("the cache served a stale answer");
 }
 
-/// A symbol the project actually defines, so the "name that exists" case has something to look for.
 async fn first_defined_symbol(handle: &LanguageServerHandle, files: &[String]) -> Option<String> {
     for file in files.iter().take(25) {
         let Ok(overview) = SymbolQuery::new(handle)

@@ -14,21 +14,11 @@ pub const CACHE_DIR: &str = "cache";
 const INDEX_FILE: &str = "symbols.json";
 const GITIGNORE_CONTENTS: &str = "*\n";
 
-/// Bumped whenever the stored shape changes. An index written by another version is dropped rather
-/// than half-read, because a symbol tree that deserialises into a shape nobody expects is worse
-/// than a cold start.
 const FORMAT_VERSION: u32 = 1;
 
-/// How many newly indexed files accumulate before the index is written out.
-///
-/// A project-wide `find_symbol` indexes hundreds of files in one sweep, and writing after each of
-/// them would rewrite the whole index hundreds of times. Waiting for shutdown alone would lose the
-/// whole sweep whenever the process is killed, which for a server speaking over stdio is a normal
-/// way to end.
 const FLUSH_EVERY: usize = 64;
 
-/// Size and modification time of a source file, which together decide whether a stored tree still
-/// describes it.
+/// Size and modification time of a source file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceStamp {
     modified_nanos: u64,
@@ -54,8 +44,6 @@ impl SourceStamp {
 struct Entry {
     #[serde(flatten)]
     stamp: SourceStamp,
-    /// Value of the clock when this entry was last reached for, so eviction drops what sessions
-    /// never ask about rather than whatever the map happens to iterate first.
     touched: u64,
     symbols: Vec<SymbolNode>,
 }
@@ -69,8 +57,6 @@ struct Index {
     entries: HashMap<String, Entry>,
 }
 
-/// The write-side view, which borrows the entries instead of cloning the whole index to serialise
-/// it. The entries are the largest thing Biskit holds in memory on a big project.
 #[derive(Debug, Serialize)]
 struct IndexRef<'a> {
     version: u32,
@@ -81,23 +67,16 @@ struct IndexRef<'a> {
 #[derive(Debug, Default)]
 struct State {
     loaded: bool,
-    /// Entries added since the last write.
     pending: usize,
     clock: u64,
     entries: HashMap<String, Entry>,
 }
 
 /// Symbol trees kept across sessions, keyed by path plus size plus modification time.
-///
-/// `find_symbol` with no `relative_path` issues one `documentSymbol` round trip per file that
-/// survives the literal prefilter, through a single stdio pipe, every session from cold. Almost
-/// none of those files have changed since the last session asked about them, so almost none of
-/// those round trips buy anything.
 pub struct SymbolCache {
     root: PathBuf,
     file: PathBuf,
     enabled: bool,
-    /// Entries kept before the least recently reached are dropped. Zero means no ceiling.
     capacity: usize,
     state: Mutex<State>,
 }
@@ -199,8 +178,6 @@ impl SymbolCache {
         Ok(true)
     }
 
-    /// Reads the index from disk once per process. A failure to read is a cold cache, not an
-    /// error: every answer the cache would have given can still be asked of the language server.
     async fn load(&self, state: &mut State) {
         if state.loaded {
             return;
@@ -257,8 +234,6 @@ fn read_index(file: &Path, root: &Path) -> Option<Index> {
         return None;
     }
 
-    // A file deleted since it was indexed can never be asked about again, so its tree is dead
-    // weight in every later read of this index.
     index
         .entries
         .retain(|relative, _| root.join(relative).is_file());
@@ -272,15 +247,11 @@ fn write_index(file: &Path, payload: &[u8]) -> Result<()> {
     std::fs::create_dir_all(directory)
         .with_context(|| format!("failed to create {}", directory.display()))?;
 
-    // `.biskit` is checked in, and nothing under the cache belongs in a commit. Writing the rule
-    // beside the index covers projects whose `.biskit/.gitignore` predates the cache.
     let gitignore = directory.join(".gitignore");
     if !gitignore.exists() {
         let _ = std::fs::write(&gitignore, GITIGNORE_CONTENTS);
     }
 
-    // Written beside the index and renamed over it, so a process that dies mid-write leaves the
-    // previous index intact rather than a half-written one that parses into nothing.
     let temporary = directory.join("symbols.json.writing");
     std::fs::write(&temporary, payload)
         .with_context(|| format!("failed to write {}", temporary.display()))?;
@@ -289,7 +260,6 @@ fn write_index(file: &Path, payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Drops the least recently reached entries until the index fits its ceiling.
 fn evict(entries: &mut HashMap<String, Entry>, capacity: usize) {
     if capacity == 0 || entries.len() <= capacity {
         return;
@@ -299,8 +269,6 @@ fn evict(entries: &mut HashMap<String, Entry>, capacity: usize) {
     let mut touched: Vec<u64> = entries.values().map(|entry| entry.touched).collect();
     touched.sort_unstable();
 
-    // Entries tied on the cutoff all go, which can take the index below the ceiling. Keeping some
-    // of a tie and not the rest would need a second key that says nothing about usefulness.
     let cutoff = touched[excess - 1];
     entries.retain(|_, entry| entry.touched > cutoff);
 }
@@ -358,8 +326,6 @@ mod tests {
 
         fn rewrite(&self, relative: &str, contents: &str) {
             let path = self.project.root().join(relative);
-            // Two writes inside one filesystem tick would leave the stamp unchanged, which is the
-            // one case the cache cannot see, so the length is moved as well.
             std::fs::write(path, contents).unwrap();
         }
     }

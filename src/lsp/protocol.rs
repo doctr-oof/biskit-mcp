@@ -143,8 +143,7 @@ pub enum HoverContents {
 }
 
 impl HoverContents {
-    /// The markdown of the hover, with the three shapes the specification allows flattened into
-    /// the one an agent can read.
+    /// The markdown of the hover, with the three shapes the specification allows flattened into the one an agent can read.
     pub fn into_markdown(self) -> String {
         match self {
             Self::Markup(content) => content.value,
@@ -195,7 +194,7 @@ pub struct InlayHint {
     pub kind: Option<u32>,
 }
 
-/// LSP `InlayHintKind`. Anything else is reported without a kind rather than guessed at.
+/// LSP `InlayHintKind`.
 pub fn inlay_hint_kind_label(kind: Option<u32>) -> Option<&'static str> {
     match kind {
         Some(1) => Some("type"),
@@ -220,8 +219,7 @@ impl Documentation {
     }
 }
 
-/// A parameter is named either by its own text or by a half-open offset pair into the signature
-/// label it belongs to.
+/// A parameter is named either by its own text or by a half-open offset pair into the signature label it belongs to.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum ParameterLabel {

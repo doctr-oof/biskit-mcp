@@ -1,29 +1,10 @@
 //! Resolution for the Carpenter fork's `shared("Name")` string require.
-//!
-//! Sawhorse Roblox frameworks give the `shared` global a `__call` metamethod, so `shared("Foo")` is
-//! a runtime require of the module whose file is named `Foo.luau`. The language server fork resolves
-//! it exactly as it resolves `require`, which means every LSP-backed tool already understands it.
-//! Biskit's require graph does not go through the language server, so it has to resolve the same
-//! calls the same way or report a dependency graph that is quietly missing most of its edges.
-//!
-//! This is a port of `src/SharedRequire.cpp` in `Sawhorse-Interactive/luau-lsp-carpenter`, at commit
-//! `dded194`. The fork is the specification: where its behaviour looks wrong — the case-insensitive
-//! lookup in particular — this matches it anyway, because an answer that disagrees with the
-//! diagnostics the agent is reading is worse than one that is consistently surprising.
-//!
-//! Known divergences, both degenerate:
-//!
-//! - A root-level `init.luau` is indexed by the fork under the workspace directory's name. Biskit
-//!   works in project-relative paths, which do not carry that name, so it is not indexed at all.
-//! - The fork excludes a candidate that resolves to the requiring module's own name. Biskit compares
-//!   file paths instead, which is the same test for every project that does not mount one file at
-//!   two instance paths.
 
 use std::collections::HashMap;
 
 use super::sourcemap::Sourcemap;
 
-/// The global treated as a string require. Must stay in step with `kGlobalName` in the fork.
+/// The global treated as a string require.
 pub const GLOBAL_NAME: &str = "shared";
 
 /// What a `shared("Name")` lookup came to.
@@ -32,27 +13,18 @@ pub enum Resolution {
     /// The project-relative path of the module the call resolves to.
     Found(String),
     NotFound,
-    /// Every candidate that tied for nearest, sorted. The fork resolves this to a module name that
-    /// cannot exist so that Luau reports its ordinary unknown-require diagnostic listing them.
+    /// Every candidate that tied for nearest, sorted.
     Ambiguous(Vec<String>),
 }
 
 struct Entry {
     relative_path: String,
-    /// Root-relative, extension stripped, forward-slashed, lowercased, with `dir/init.luau` folded
-    /// under `dir`. What a needle carrying path segments is matched against.
     key_path: String,
 }
 
 /// Case-insensitive index of the project's Luau files, keyed by file stem.
-///
-/// The fork stores URIs and resolves module names lazily, because a sourcemap reload changes every
-/// module name underneath it. Biskit rebuilds the whole graph when the sourcemap stamp moves, so the
-/// names are resolved once here instead.
 pub struct SharedIndex {
     entries: HashMap<String, Vec<Entry>>,
-    /// Project-relative path to the name proximity is scored against: the sourcemap virtual path
-    /// where the file has one, the file path where it does not.
     module_names: HashMap<String, String>,
 }
 
@@ -89,17 +61,12 @@ impl SharedIndex {
     }
 
     /// `name` is a bare stem (`"Foo"`) or a partial path (`"jobs/Foo"`), case-insensitive.
-    ///
-    /// Where several files match, the one sharing the longest leading path with the requiring module
-    /// wins, which with a sourcemap loaded is instance-tree proximity and without one is directory
-    /// proximity. A genuine tie is reported rather than guessed at.
     pub fn resolve(&self, name: &str, requiring_relative_path: &str) -> Resolution {
         if name.is_empty() {
             return Resolution::NotFound;
         }
 
         let mut needle = name.to_ascii_lowercase().replace('\\', "/");
-        // A written-out extension is tolerated: `shared("Foo.luau")` names the same module.
         for extension in [".luau", ".lua"] {
             if needle.len() > extension.len() && needle.ends_with(extension) {
                 needle.truncate(needle.len() - extension.len());
@@ -118,7 +85,6 @@ impl SharedIndex {
         let matches: Vec<&Entry> = bucket
             .iter()
             .filter(|entry| !qualified || ends_with_path_suffix(&entry.key_path, &needle))
-            // A module never resolves to itself.
             .filter(|entry| entry.relative_path != requiring_relative_path)
             .collect();
 
@@ -163,11 +129,6 @@ impl SharedIndex {
     }
 }
 
-/// The name proximity is scored against, which is what the fork's `getModuleName` reports.
-///
-/// Only the ordering the scores produce matters, so a project-relative path stands in for the
-/// absolute one the fork would compare: stripping the same root prefix from both sides leaves every
-/// comparison ranked identically.
 fn module_name(sourcemap: &Sourcemap, relative_path: &str) -> String {
     let Some(node) = sourcemap.nodes_for_file(relative_path).first().copied() else {
         return relative_path.to_string();
@@ -177,8 +138,6 @@ fn module_name(sourcemap: &Sourcemap, relative_path: &str) -> String {
     let mut current = Some(node);
     while let Some(index) = current {
         let node = sourcemap.node(index);
-        // The root is reported by the label the rest of Biskit spells it with, which is what the
-        // fork's virtual paths use too: `game` whatever the rojo project happens to be called.
         segments.push(match node.parent {
             Some(_) => node.name.as_str(),
             None => node.instance_path.as_str(),
@@ -189,14 +148,12 @@ fn module_name(sourcemap: &Sourcemap, relative_path: &str) -> String {
     segments.join("/")
 }
 
-/// The bucket key and match path for a file, or nothing when the file cannot be one.
 fn index_key_for(relative_path: &str) -> Option<(String, String)> {
     let without_extension = strip_luau_extension(relative_path)?;
     let mut key_path = without_extension;
     let mut stem = last_segment(key_path);
 
     if stem.eq_ignore_ascii_case("init") {
-        // Rojo collapses `dir/init.luau` into an instance named `dir`.
         key_path = match without_extension.rfind('/') {
             Some(cut) => &without_extension[..cut],
             None => "",
@@ -222,7 +179,6 @@ fn last_segment(path: &str) -> &str {
     }
 }
 
-/// True when `path` ends with `suffix` on a `/` boundary, or is exactly `suffix`.
 fn ends_with_path_suffix(path: &str, suffix: &str) -> bool {
     if path == suffix {
         return true;
@@ -233,8 +189,6 @@ fn ends_with_path_suffix(path: &str, suffix: &str) -> bool {
     }
 }
 
-/// Leading segments two paths share. Module names are `/`-separated virtual paths with a sourcemap
-/// loaded and file paths without one, so both separators count.
 fn common_segment_count(left: &str, right: &str) -> usize {
     let is_separator = |byte: u8| byte == b'/' || byte == b'\\';
     let mut count = 0;
@@ -263,7 +217,6 @@ fn common_segment_count(left: &str, right: &str) -> usize {
 mod tests {
     use super::*;
 
-    /// A sourcemap wide enough to make instance-tree proximity mean something.
     fn sourcemap() -> Sourcemap {
         Sourcemap::from_json_for_test(
             r#"{
@@ -368,7 +321,6 @@ mod tests {
     #[test]
     fn a_partial_path_only_matches_on_a_segment_boundary() {
         let index = index(&["src/Shared/Config.luau", "src/Shared/Consumer.luau"]);
-        // "ared/Config" is a substring of the path but not a suffix of whole segments.
         assert_eq!(
             index.resolve("ared/Config", "src/Shared/Consumer.luau"),
             Resolution::NotFound
@@ -416,7 +368,6 @@ mod tests {
         );
     }
 
-    /// With no sourcemap the same tie-break runs on directory proximity instead.
     #[test]
     fn proximity_falls_back_to_directory_depth_without_a_sourcemap() {
         let owned: Vec<String> = ["a/deep/Config.luau", "b/Config.luau", "a/deep/Caller.luau"]

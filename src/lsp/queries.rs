@@ -25,19 +25,13 @@ const NAME_PATH_HINT: &str = "a name path is a symbol name such as \"update\", o
 const SCAN_ABORTED: &str = "the project scan stopped early because the language server stopped \
                             answering; restart it with restart_language_server";
 
-/// Lines either side of a declaration reported with `include_body`. A declaration whose own symbol
-/// could not be resolved has only its line to show, so one line of context earns its place there.
 const DECLARATION_CONTEXT_LINES: usize = 1;
 
 const POINT_HINT: &str = "name the symbol with name_path, or give the line and column of a use of \
                           it; line and column are 1-based, as every Biskit result reports them";
 
-/// Ceiling on the documentation half of a hover, which is prose and runs to hundreds of lines on a
-/// well documented Roblox API member.
 const MAX_DOCUMENTATION_CHARS: usize = 4_000;
 
-/// luau-lsp answers `typeDefinition` from the *type name*, not from the value it annotates, so a
-/// name path that resolves to a variable lands on a position the server has nothing to say about.
 const TYPE_DEFINITION_HINT: &str = "aim line and column at the type's own name: in \
                                     `local config: PlayerConfig`, at `PlayerConfig` rather than \
                                     at `config`. A value with no written annotation has no type \
@@ -53,8 +47,6 @@ const NO_SIGNATURES_NOTE: &str = "the language server answered with no signature
                                   line and column at an argument position rather than at the \
                                   function's declaration.";
 
-/// Ceiling on the hover requests one answer spends filling `detail`. Detail is already opt-in, but
-/// a deep tree over a large file would otherwise cost one round trip per symbol with no bound.
 const MAX_DETAIL_HOVERS: usize = 200;
 
 const DETAIL_CAPPED_NOTE: &str = "detail was filled for the first symbols only: one hover request \
@@ -70,7 +62,6 @@ const SELF_REFERENCE_NOTE: &str = "references marked resolved_by \"text\" were f
                                    call sites. They are matched on the symbol's own name, so \
                                    confirm the receiver before treating one as a call site.";
 
-/// Marks a reference the text scan recovered rather than the language server reported.
 const TEXT_RESOLUTION: &str = "text";
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,25 +78,21 @@ pub struct SymbolMatch {
     pub body: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<SymbolMatch>,
-    /// Children the low-level kind filter dropped, so a symbol that declares locals is never
-    /// reported as declaring nothing. Pass `include_locals: true` to see them instead of count
-    /// them. Omitted when nothing was dropped.
+    /// Children the low-level kind filter dropped.
     #[serde(skip_serializing_if = "crate::json::is_zero")]
     pub omitted_children: usize,
-    /// Where to aim a hover to fill `detail`. A means to the answer rather than part of it, so it
-    /// never reaches the caller.
+    /// Where to aim a hover to fill `detail`.
     #[serde(skip)]
     pub hover_at: Option<Position>,
 }
 
-/// Symbols keyed by the file that defines them, so a path is spelled once per file rather than
-/// once per symbol.
+/// Symbols keyed by the file that defines them.
 pub type SymbolsByFile = BTreeMap<String, Vec<SymbolMatch>>;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SymbolSearchResult {
     pub symbols: SymbolsByFile,
-    /// True when `max_matches` cut the result set short. Omitted when false.
+    /// True when `max_matches` cut the result set short.
     #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
     /// Set only when the detail budget ran out before every symbol carried one.
@@ -113,9 +100,7 @@ pub struct SymbolSearchResult {
     pub note: Option<String>,
 }
 
-/// The symbols of one file, in the shape `get_symbols_overview` answers with. The file was named
-/// by the caller, so the symbols need no path key; the note is what the bare list had nowhere to
-/// put.
+/// The symbols of one file, in the shape `get_symbols_overview` answers with.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SymbolOverviewResult {
     pub symbols: Vec<SymbolMatch>,
@@ -129,8 +114,7 @@ pub struct ReferenceMatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub containing_symbol: Option<String>,
     pub snippet: String,
-    /// Set to "text" on a reference the `self:` scan recovered rather than the language server
-    /// reported. Omitted on everything the language server resolved itself.
+    /// Set to "text" on a reference the `self:` scan recovered rather than the language server reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_by: Option<&'static str>,
 }
@@ -141,7 +125,7 @@ pub type ReferencesByFile = BTreeMap<String, Vec<ReferenceMatch>>;
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ReferenceSearchResult {
     pub references: ReferencesByFile,
-    /// True when `max_reference_matches` cut the result set short. Omitted when false.
+    /// True when `max_reference_matches` cut the result set short.
     #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
     /// Set only when the answer carries a reference the text scan recovered.
@@ -264,8 +248,7 @@ pub struct ExportedType {
 #[derive(Debug, Clone, Serialize)]
 pub struct ModuleApi {
     pub relative_path: String,
-    /// The returned expression as written, so a module that returns something unusual still says
-    /// what it returns.
+    /// The returned expression as written, so a module that returns something unusual still says what it returns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub returns: Option<String>,
     /// One of `table`, `function`, `expression`, or `none`.
@@ -281,9 +264,6 @@ pub struct ModuleApi {
 }
 
 /// Where a request points inside a file.
-///
-/// A name path is what an agent holding a symbol has; a line and column is what an agent holding a
-/// call site, an expression, or a diagnostic has. Both reach the same LSP position.
 #[derive(Debug, Clone, Copy)]
 pub enum SymbolPoint<'a> {
     NamePath(&'a str),
@@ -319,12 +299,10 @@ impl<'a> SymbolPoint<'a> {
     }
 }
 
-/// A position the server can be asked about, and what Biskit knows sits there.
 struct ResolvedPoint {
     path: PathBuf,
     relative_path: String,
     position: Position,
-    /// Absent when the position falls outside every symbol in the file.
     symbol: Option<SymbolNode>,
 }
 
@@ -332,8 +310,7 @@ pub struct SymbolQuery<'a> {
     pub handle: &'a LanguageServerHandle,
 }
 
-/// What a rendered symbol carries beyond its name, kind, and line range. `detail` is the symbol's
-/// resolved signature, which is long enough to be worth asking for rather than assuming.
+/// What a rendered symbol carries beyond its name, kind, and line range.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RenderOptions {
     pub depth: u32,
@@ -384,7 +361,6 @@ impl<'a> SymbolQuery<'a> {
             );
         }
 
-        // Walking the named subtree rather than walking the project and filtering afterwards.
         self.handle.resolve_luau_files(Some(&resolved)).await
     }
 
@@ -400,8 +376,6 @@ impl<'a> SymbolQuery<'a> {
             .await?;
         let files = prefilter_by_literal(files, pattern.literal_filter()).await?;
 
-        // Collecting one past the cap is what makes a complete result set distinguishable
-        // from a truncated one.
         let probe = request.max_matches.saturating_add(1);
         let mut matches: Vec<(String, SymbolMatch)> = Vec::new();
         let mut budget = MAX_DETAIL_HOVERS;
@@ -413,9 +387,6 @@ impl<'a> SymbolQuery<'a> {
             }
             let (symbols, content) = match self.handle.document_symbols(&session, &path).await {
                 Ok(found) => found,
-                // One file failing to parse is worth stepping over. A server that has stopped
-                // answering is not: every remaining file would burn a full request timeout,
-                // turning a thirty second failure into an hours long one.
                 Err(error) if client::is_unavailable(&error) => {
                     return Err(error).context(SCAN_ABORTED);
                 }
@@ -469,8 +440,6 @@ impl<'a> SymbolQuery<'a> {
             include_locals,
         };
 
-        // Low-level kinds are pruned from children, not from the top level: a module whose
-        // only top-level symbols are variables would otherwise look like an empty file.
         let mut rendered: Vec<SymbolMatch> = symbols
             .iter()
             .map(|symbol| render(symbol, &lines, options))
@@ -486,7 +455,6 @@ impl<'a> SymbolQuery<'a> {
         })
     }
 
-    /// Resolves a name path to exactly one symbol, erroring when the pattern is ambiguous.
     async fn locate_one(
         &self,
         session: &Session,
@@ -536,7 +504,6 @@ impl<'a> SymbolQuery<'a> {
         }
     }
 
-    /// Resolves either kind of pointer into one position in one file.
     async fn locate_point(
         &self,
         session: &Session,
@@ -578,8 +545,6 @@ impl<'a> SymbolQuery<'a> {
             character: column - 1,
         };
 
-        // The containing symbol is context on the answer rather than part of it, so a file whose
-        // symbol tree cannot be built still resolves to a position the server can be asked about.
         let symbols = self
             .handle
             .document_symbols(session, &path)
@@ -640,8 +605,7 @@ impl<'a> SymbolQuery<'a> {
         })
     }
 
-    /// Where the *type* of a symbol is declared, which in Luau is usually an `export type` in some
-    /// other module.
+    /// Where the *type* of a symbol is declared.
     pub async fn type_definition(
         &self,
         point: SymbolPoint<'_>,
@@ -678,9 +642,6 @@ impl<'a> SymbolQuery<'a> {
     }
 
     /// The inferred types luau-lsp would draw inline over a line range.
-    ///
-    /// This is the cheapest way to see what a function's arguments and returns actually resolve
-    /// to: positions and short labels, with none of the body they were inferred from.
     pub async fn inlay_hints(
         &self,
         relative_path: &str,
@@ -735,14 +696,10 @@ impl<'a> SymbolQuery<'a> {
             Err(error) => return Err(error),
         };
 
-        // luau-lsp answers with the hints for the whole document whatever range it was asked for,
-        // so a caller who asked about ten lines would otherwise be handed the file.
         let mut in_range: Vec<InlayHint> = hints
             .into_iter()
             .filter(|hint| (from..=to).contains(&hint.position.line))
             .collect();
-        // Two hints on one line arrive in whichever order the server inferred them, which is not
-        // the order they are read in.
         in_range.sort_by_key(|hint| hint.position);
 
         let truncated = in_range.len() > max_hints;
@@ -838,12 +795,7 @@ impl<'a> SymbolQuery<'a> {
         })
     }
 
-    /// The public surface of a ModuleScript: what its returned value exposes, plus the types it
-    /// exports, and none of the body either was implemented in.
-    ///
-    /// This is the question an agent opening an unfamiliar module actually has. Answering it by
-    /// reading the file costs the whole file, and answering it with `get_symbols_overview` costs
-    /// every local the module happens to declare alongside the handful it hands back.
+    /// The public surface of a ModuleScript: what its returned value exposes, plus the types it exports, and none of the body either was implemented in.
     pub async fn module_api(&self, relative_path: &str, max_exports: usize) -> Result<ModuleApi> {
         let path = self.project().resolve(relative_path)?;
         ensure_luau_file(&path)?;
@@ -852,8 +804,6 @@ impl<'a> SymbolQuery<'a> {
         let (symbols, content) = self.handle.document_symbols(&session, &path).await?;
         let relative = self.project().relativize(&path)?;
 
-        // Comments are blanked rather than removed so a `return` inside one is not mistaken for
-        // the module's own, and every line number still names the line it was written on.
         let blanked = crate::roblox::requires::blank_comments(&content);
         let types = exported_types(&content, &blanked, max_exports);
 
@@ -912,8 +862,6 @@ impl<'a> SymbolQuery<'a> {
 
         Ok(ModuleApi {
             relative_path: relative,
-            // A table literal's text is an opening brace and the rest of the file, which says
-            // nothing the note does not say better.
             returns: (return_kind != "table_literal").then_some(expression),
             return_kind,
             exports,
@@ -934,8 +882,6 @@ impl<'a> SymbolQuery<'a> {
         let (path, symbol, position) = self.locate_one(&session, name_path, relative_path).await?;
         let locations = session.definition(&path, position).await?;
 
-        // A local declared in place has nothing further to point at, so the server answers with
-        // nothing. The symbol itself is the correct answer there.
         if locations.is_empty() {
             let content = session.ensure_open(&path).await?.content;
             let relative = self.project().relativize(&path)?;
@@ -977,7 +923,6 @@ impl<'a> SymbolQuery<'a> {
         .await
     }
 
-    /// `find_referencing_symbols` from a position that has already been resolved.
     async fn references_at(
         &self,
         session: &Session,
@@ -989,8 +934,6 @@ impl<'a> SymbolQuery<'a> {
     ) -> Result<ReferenceSearchResult> {
         let locations = session.references(path, position, false).await?;
 
-        // Collecting one past the cap is what makes a complete result set distinguishable
-        // from a truncated one.
         let probe = max_results.saturating_add(1);
         let mut references: Vec<(String, ReferenceMatch)> = Vec::new();
 
@@ -1014,8 +957,6 @@ impl<'a> SymbolQuery<'a> {
         wanted.extend(recovered);
 
         let mut grouped = group_locations_by_file(wanted);
-        // The recovered locations were appended after everything the server reported, so the file
-        // they belong to is the one file whose references are no longer in source order.
         if !recovered_lines.is_empty()
             && let Some((_, group)) = grouped
                 .iter_mut()
@@ -1026,9 +967,6 @@ impl<'a> SymbolQuery<'a> {
             });
         }
 
-        // Forty references spread over five files are five files' worth of information. Reading
-        // and re-requesting the symbol tree once per reference asked the server for the same file
-        // as many times as it happened to appear.
         'files: for (target, group) in grouped {
             if references.len() >= probe {
                 break;
@@ -1076,16 +1014,6 @@ impl<'a> SymbolQuery<'a> {
         })
     }
 
-    /// Call sites that reach the symbol through `self`, which the language server does not resolve.
-    ///
-    /// luau-lsp types the implicit `self` of a colon-declared method as a fresh generic rather than
-    /// as the owner table, so `self:Method()` binds to nothing and never reaches a references
-    /// answer; a private helper called only that way reports zero references and reads as dead
-    /// code. The same inference is what puts an unbound `<a>` in the method's hover.
-    ///
-    /// The scan is confined to the declaring file, because that is the only file `self` reliably
-    /// names the owner in. Widening it would trade the silent miss for the same false positives
-    /// that make grep the wrong tool for this.
     async fn self_receiver_locations(
         &self,
         session: &Session,
@@ -1093,7 +1021,6 @@ impl<'a> SymbolQuery<'a> {
         symbol: Option<&SymbolNode>,
         reported_lines: &HashSet<u32>,
     ) -> Result<Vec<Location>> {
-        // A symbol with no owner is not reachable through `self` in the first place.
         let Some(symbol) = symbol.filter(|node| node.name_path.contains('/')) else {
             return Ok(Vec::new());
         };
@@ -1153,8 +1080,6 @@ impl<'a> SymbolQuery<'a> {
                     }),
                     children: Vec::new(),
                     omitted_children: 0,
-                    // The location is what the caller asked about, so it is what a hover for
-                    // `detail` has to aim at; the containing symbol is only context on it.
                     hover_at: include_detail.then_some(location.range.start),
                 });
             }
@@ -1228,8 +1153,6 @@ impl<'a> SymbolQuery<'a> {
         }
 
         let locations = session.references(&path, position, false).await?;
-        // The declaring file is already reported at symbol scope; revisiting it at file scope
-        // would duplicate every entry.
         let mut visited = std::collections::HashSet::from([path]);
 
         for location in locations {
@@ -1256,11 +1179,6 @@ impl<'a> SymbolQuery<'a> {
     }
 }
 
-/// The last `return` written at the start of a line, which in Luau is the module's own.
-///
-/// A `return` inside a function body is indented; one at column zero closes the chunk. Taking the
-/// last of them rather than the first means a module that returns early under a guard still
-/// reports what it hands back in the ordinary case.
 fn top_level_return(blanked: &str) -> Option<(u32, String)> {
     let mut found = None;
     for (index, line) in blanked.lines().enumerate() {
@@ -1279,7 +1197,6 @@ fn top_level_return(blanked: &str) -> Option<(u32, String)> {
     found
 }
 
-/// The name of the value a module returns, where the return statement names one.
 fn returned_name(expression: &str) -> (Option<String>, Option<&'static str>) {
     let trimmed = expression.trim();
     if trimmed.starts_with("function") {
@@ -1288,7 +1205,6 @@ fn returned_name(expression: &str) -> (Option<String>, Option<&'static str>) {
     if trimmed.starts_with('{') {
         return (None, Some("table_literal"));
     }
-    // `return setmetatable(Class, Class)` is how a Luau class module hands back its table.
     if let Some(rest) = trimmed.strip_prefix("setmetatable(") {
         let first = rest.split(',').next().unwrap_or_default().trim();
         return (identifier(first), None);
@@ -1296,10 +1212,6 @@ fn returned_name(expression: &str) -> (Option<String>, Option<&'static str>) {
     (identifier(trimmed), None)
 }
 
-/// The whole of `text`, when the whole of it is one identifier.
-///
-/// A partial match would be worse than none: `return Combat.new` names a function, and reporting
-/// the members of `Combat` as the module's surface would be wrong rather than incomplete.
 fn identifier(text: &str) -> Option<String> {
     let trimmed = text.trim().trim_end_matches(')');
     (!trimmed.is_empty()
@@ -1324,13 +1236,8 @@ fn export_type_pattern() -> &'static regex::Regex {
     })
 }
 
-/// Lines an `export type` declaration is allowed to run to before it is cut.
 const MAX_TYPE_DECLARATION_LINES: usize = 40;
 
-/// Every `export type` in a file, quoted from the source rather than from the blanked copy.
-///
-/// The declarations are found in the blanked text so a type written inside a comment is not
-/// reported, and the text is taken from the real source so the answer reads as it was written.
 fn exported_types(source: &str, blanked: &str, limit: usize) -> Vec<ExportedType> {
     let original: Vec<&str> = source.lines().collect();
     let scanned: Vec<&str> = blanked.lines().collect();
@@ -1374,8 +1281,6 @@ fn bracket_delta(line: &str) -> isize {
     })
 }
 
-/// Whether a type declaration is obviously unfinished at the end of a line, which is how a union
-/// written one variant per line reads.
 fn continues(line: &str) -> bool {
     matches!(
         line.trim_end().chars().next_back(),
@@ -1403,12 +1308,6 @@ const EMPTY_TABLE_NOTE: &str = "the returned table has no members the language s
                                 this file. Members assigned through another name, or by a loop, \
                                 are invisible here. The table is";
 
-/// Splits hover markdown into its code half and its prose half.
-///
-/// luau-lsp answers with the resolved type in a fenced block followed by whatever doc comment it
-/// found, so the fences are what separate the two rather than a heading or a blank line. Hover with
-/// no fence at all is taken as all signature: a bare type is what the server had to say about the
-/// position, and filing it under documentation would hide it behind a flag.
 fn split_hover(markdown: &str) -> (String, String) {
     let mut signature: Vec<&str> = Vec::new();
     let mut documentation: Vec<&str> = Vec::new();
@@ -1435,13 +1334,6 @@ fn split_hover(markdown: &str) -> (String, String) {
     (signature.join("\n").trim().to_string(), prose)
 }
 
-/// Drops type parameters the language server inferred but the signature never goes on to use.
-///
-/// A method declared with colon syntax has an implicit `self`, which luau-lsp types as a fresh
-/// generic rather than as the owner table, so hover reports `function Owner:Method<a>(...)` for a
-/// signature whose source declares no generics at all. `get_signature_help` does not carry the
-/// parameter, so the two tools disagreed about one symbol. A generic the signature does go on to
-/// mention is load-bearing and is kept.
 fn strip_unbound_generics(signature: &str) -> String {
     let Some((open, close)) = generic_list(signature) else {
         return signature.to_string();
@@ -1473,8 +1365,6 @@ fn strip_unbound_generics(signature: &str) -> String {
     )
 }
 
-/// Byte range of the `<...>` a function name carries, which is the only angle bracket pair a
-/// declared generic list can sit in. Anything after the first `(` is a parameter or a return type.
 fn generic_list(signature: &str) -> Option<(usize, usize)> {
     let limit = signature.find('(').unwrap_or(signature.len());
     let bytes = signature.as_bytes();
@@ -1499,8 +1389,6 @@ fn generic_list(signature: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// Splits a generic list on the commas that separate its own parameters, leaving the ones nested
-/// inside a parameter's own type where they are.
 fn split_generics(list: &str) -> Vec<&str> {
     let mut parameters = Vec::new();
     let mut depth = 0usize;
@@ -1526,10 +1414,6 @@ fn split_generics(list: &str) -> Vec<&str> {
     parameters
 }
 
-/// Whether a generic parameter is a bare name the rest of the signature never mentions.
-///
-/// A parameter carrying a default is written out in the source, whatever the signature does with
-/// it, so only bare names and bare packs are candidates for removal.
 fn is_unbound_generic(parameter: &str, outside: &str) -> bool {
     let name = parameter.strip_suffix("...").unwrap_or(parameter);
     if name.is_empty() || name.as_bytes()[0].is_ascii_digit() {
@@ -1541,7 +1425,6 @@ fn is_unbound_generic(parameter: &str, outside: &str) -> bool {
     find_identifier(outside, name).is_none()
 }
 
-/// Positions of `self:name` and `self.name` in source whose comments are already blanked.
 fn self_receiver_positions(blanked: &str, name: &str) -> Vec<Position> {
     if name.is_empty() {
         return Vec::new();
@@ -1583,7 +1466,6 @@ fn self_receiver_positions(blanked: &str, name: &str) -> Vec<Position> {
     found
 }
 
-/// The `---` luau-lsp puts between the type and the docs is a separator, not documentation.
 fn is_horizontal_rule(line: &str) -> bool {
     let trimmed = line.trim();
     let Some(first) = trimmed.chars().next() else {
@@ -1603,7 +1485,6 @@ fn cap_documentation(text: String) -> String {
     capped
 }
 
-/// luau-lsp reports the declaration even when `includeDeclaration` is false, so drop it here.
 fn is_declaration_site(location: &Location, path: &Path, position: Position) -> bool {
     location.range.start == position
         && uri::to_path(&location.uri).is_ok_and(|target| target == path)
@@ -1630,8 +1511,6 @@ fn group_by_file<T>(matches: Vec<(String, T)>) -> BTreeMap<String, Vec<T>> {
     grouped
 }
 
-/// Groups locations by the file they point into, keeping the order in which each file was first
-/// seen so a truncated result set is still the first N in the server's own ordering.
 fn group_locations_by_file(locations: Vec<Location>) -> Vec<(PathBuf, Vec<Location>)> {
     let mut order: Vec<(PathBuf, Vec<Location>)> = Vec::new();
     let mut seen: std::collections::HashMap<PathBuf, usize> = std::collections::HashMap::new();
@@ -1652,15 +1531,6 @@ fn group_locations_by_file(locations: Vec<Location>) -> Vec<(PathBuf, Vec<Locati
 }
 
 /// Drops candidate files whose bytes never spell `needle`.
-///
-/// A symbol cannot be defined in a file that does not contain its name, and reading a file and
-/// searching it for a literal is orders of magnitude cheaper than a `documentSymbol` round trip
-/// through a single stdio pipe. For the common exploratory query, which matches nothing, this is
-/// the difference between one request per file in the project and none.
-///
-/// A file that cannot be read is kept, so the language server reports the problem rather than the
-/// file quietly vanishing from the result set. A single candidate is never filtered: a query
-/// naming one file should behave exactly as it did before.
 pub async fn prefilter_by_literal(
     files: Vec<PathBuf>,
     needle: Option<&str>,
@@ -1719,14 +1589,10 @@ fn collect_matches(
     }
 }
 
-/// Renders a symbol that sits at the top of a result, named by its full name path.
 fn render(node: &SymbolNode, lines: &LineIndex<'_>, options: RenderOptions) -> SymbolMatch {
     render_node(node, lines, options, true)
 }
 
-/// Renders a nested symbol, named by its own leaf segment. The ancestry is already spelled out by
-/// the chain of parents it sits under, so repeating it would cost the caller the prefix on every
-/// child. Join a child's name to its parent's name path with `/` to address it.
 fn render_child(node: &SymbolNode, lines: &LineIndex<'_>, options: RenderOptions) -> SymbolMatch {
     let options = RenderOptions {
         include_body: false,
@@ -1748,9 +1614,6 @@ fn render_node(
             depth: options.depth - 1,
             ..options
         };
-        // A member of a table is part of what the table is, whatever kind the server gave it. The
-        // low-level filter is aimed at locals declared inside a body, which are noise by default
-        // and the whole point of the traversal once `include_locals` asks for them.
         let visible: Vec<&SymbolNode> = node
             .children
             .iter()
@@ -1779,8 +1642,6 @@ fn render_node(
         kind: node.kind_label().to_string(),
         start_line: node.range.start.line + 1,
         end_line: node.range.end.line + 1,
-        // Left empty for the hover pass to fill: the server's own `detail` is parameter names with
-        // no types on a function, and nothing at all on anything else.
         detail: None,
         body: options.include_body.then(|| extract_body(lines, node)),
         children,
@@ -1791,15 +1652,6 @@ fn render_node(
     }
 }
 
-/// Fills `detail` from hover for every rendered symbol carrying a position, depth first.
-///
-/// `DocumentSymbol.detail` is what `include_detail` used to answer with, and luau-lsp populates it
-/// with parameter names for a function and with nothing at all for anything else. Hover is where
-/// the resolved signature lives, so reading it here is what makes `detail` and `explain_symbol`
-/// agree about one symbol instead of disagreeing about it.
-///
-/// Returns whether `budget` ran out with symbols still uncovered, which the caller reports rather
-/// than letting the missing detail read as a server that had nothing to say.
 async fn attach_details(
     session: &Session,
     path: &Path,
@@ -1844,7 +1696,6 @@ fn extract_body(lines: &LineIndex<'_>, node: &SymbolNode) -> String {
         .into_owned()
 }
 
-/// The line at `line`, widened by `context` lines on each side.
 fn snippet_around(lines: &LineIndex<'_>, line: u32, context: usize) -> String {
     let index = lines.clamp_line(line as usize);
     lines
@@ -1907,8 +1758,6 @@ pub fn severity_from_input(value: Option<u32>) -> Result<Severity> {
 mod tests {
     use super::*;
 
-    /// The module's own return is the one at column zero. Every other `return` in a module belongs
-    /// to a function inside it, and taking one of those would report the wrong surface entirely.
     #[test]
     fn only_a_return_at_the_top_level_is_the_modules_own() {
         let source = "local Combat = {}\n\
@@ -1937,8 +1786,6 @@ mod tests {
         assert_eq!(returned_name("{").1, Some("table_literal"));
     }
 
-    /// `return Combat.new` hands back a function, not the table, so reporting the table's members
-    /// as the module's surface would be a wrong answer rather than a missing one.
     #[test]
     fn a_returned_expression_that_is_not_a_bare_name_names_nothing() {
         assert!(returned_name("Combat.new").0.is_none());
@@ -1962,8 +1809,6 @@ mod tests {
         assert_eq!(found[1].declaration, "export type Id = string");
     }
 
-    /// The declarations are found in the blanked copy so that a type written inside a comment is
-    /// not reported as one the module exports.
     #[test]
     fn a_commented_out_type_is_not_an_export() {
         let source = "-- export type Old = string\nexport type New = number\n";
@@ -2144,7 +1989,6 @@ mod tests {
             "a file that cannot be read is kept so the server reports it"
         );
 
-        // No usable literal, and a lone candidate, both leave the set untouched.
         assert_eq!(
             runtime
                 .block_on(prefilter_by_literal(files.clone(), None))
@@ -2203,8 +2047,6 @@ mod tests {
         assert_eq!(split_hover(""), (String::new(), String::new()));
     }
 
-    /// The generic luau-lsp invents for the implicit `self` is the whole reason this exists, so it
-    /// has to go while a generic the signature actually uses stays.
     #[test]
     fn an_inferred_generic_is_dropped_and_a_used_one_is_kept() {
         assert_eq!(
@@ -2238,8 +2080,6 @@ mod tests {
         }
     }
 
-    /// The comparison operators a condition is written with are not a generic list, and neither is
-    /// an arrow inside a function type.
     #[test]
     fn angle_brackets_that_are_not_a_generic_list_are_left_alone() {
         for signature in [
@@ -2271,8 +2111,6 @@ mod tests {
         );
     }
 
-    /// The scan runs over blanked source, so a call written inside a comment has nothing left to
-    /// match on by the time it gets here.
     #[test]
     fn a_commented_out_self_call_is_not_a_reference() {
         let blanked = crate::roblox::requires::blank_comments(
@@ -2317,7 +2155,6 @@ mod tests {
         assert_eq!(kept.omitted_children, 0);
     }
 
-    /// A member of a table was never pruned, so asking for locals must not change what it reports.
     #[test]
     fn a_member_is_returned_either_way_and_counts_as_nothing_omitted() {
         let mut owner = node("Config", 0, 20);
@@ -2342,7 +2179,6 @@ mod tests {
         }
     }
 
-    /// `depth: 0` means "no children asked for", which is not the same as "children withheld".
     #[test]
     fn depth_zero_reports_nothing_omitted() {
         let mut owner = node("PlayerUtils/Init", 10, 20);
@@ -2385,7 +2221,6 @@ mod tests {
             SymbolPoint::NamePath("PlayerService/update")
         ));
 
-        // Columns are 1-based on the way in, and default to the start of the line.
         assert!(matches!(
             SymbolPoint::parse(None, Some(12), None).unwrap(),
             SymbolPoint::LineColumn {
@@ -2401,7 +2236,6 @@ mod tests {
             }
         ));
 
-        // An empty name path is not a pointer, so it falls through to the line.
         assert!(matches!(
             SymbolPoint::parse(Some("  "), Some(3), None).unwrap(),
             SymbolPoint::LineColumn { line: 3, .. }

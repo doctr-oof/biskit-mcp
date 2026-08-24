@@ -31,14 +31,10 @@ struct Inner {
     memories: MemoryStore,
     files: FileTools,
     language_server: Arc<LanguageServerHandle>,
-    /// Sourcemap, require graph, and Roblox API, each built once and reused.
     roblox: Arc<RobloxIndex>,
-    /// How the project root was chosen, reported by `get_status`.
     root_source: &'static str,
 }
 
-/// Tool failures travel back as `isError` results rather than JSON-RPC errors, so clients render
-/// the message itself instead of an `MCP error -32602:` envelope.
 type ToolResult = Result<CallToolResult, String>;
 
 fn fail(tool: &'static str) -> impl Fn(anyhow::Error) -> String {
@@ -48,7 +44,6 @@ fn fail(tool: &'static str) -> impl Fn(anyhow::Error) -> String {
 const OVERRUN_HINT: &str = "ask for less: narrow relative_path, lower max_matches, drop \
                             include_body, or raise tools.max_answer_chars in .biskit/settings.yml";
 
-/// Largest prefix of `value` that fits in `limit` bytes without splitting a character.
 fn truncate_at_char_boundary(value: &str, limit: usize) -> &str {
     if value.len() <= limit {
         return value;
@@ -61,16 +56,10 @@ fn truncate_at_char_boundary(value: &str, limit: usize) -> &str {
 }
 
 impl Biskit {
-    /// Ceiling on the size of one tool result, in bytes. Zero disables it.
     fn answer_limit(&self) -> usize {
         self.inner.settings.tools.max_answer_chars
     }
 
-    /// Results are serialised compactly: pretty printing costs the caller a newline and a growing
-    /// indent per field for no information gain.
-    ///
-    /// An oversized result is refused rather than truncated, because half a JSON document is not
-    /// readable at all, and the refusal names what to narrow.
     fn ok<T: Serialize>(&self, tool: &'static str, value: &T) -> ToolResult {
         let rendered = serde_json::to_string(value)
             .map_err(|error| format!("failed to serialise the tool result: {error}"))?;
@@ -89,8 +78,6 @@ impl Biskit {
         Ok(CallToolResult::success(vec![ContentBlock::text(rendered)]))
     }
 
-    /// Prose survives being cut in a way JSON does not, so an oversized text result is truncated
-    /// and says so rather than being refused outright.
     fn text(&self, value: impl Into<String>) -> ToolResult {
         let value = value.into();
         let limit = self.answer_limit();
@@ -440,12 +427,6 @@ pub struct RobloxApiRequest {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NoArguments {}
 
-/// Tools backed by the language server. Memory-only mode drops these routes entirely.
-///
-/// The Roblox tools are here despite three of them never speaking to luau-lsp, because everything
-/// they read is downloaded and kept up to date for the language server's sake. In memory-only mode
-/// there is no sourcemap loaded and no type definition cache to answer from, so routing them would
-/// only offer an agent five tools that each fail the same way.
 const LANGUAGE_SERVER_TOOLS: [&str; 16] = [
     "get_symbols_overview",
     "find_symbol",
@@ -990,8 +971,6 @@ impl Biskit {
                         relative_path: request.relative_path.as_deref(),
                         directions,
                         depth: request.depth,
-                        // A project-wide answer with no cycles in it would report almost nothing,
-                        // which is the one question it exists to answer.
                         include_cycles: request
                             .include_cycles
                             .unwrap_or(request.relative_path.is_none()),
@@ -1171,7 +1150,6 @@ mod tests {
         );
 
         let answer = rendered(&biskit.text("mémoire trop longue").unwrap());
-        // The cap falls inside the multi-byte "é", so the cut lands on the boundary below it.
         assert!(answer.starts_with("mémoire"));
         assert!(answer.contains("[truncated: 8 of 20 characters shown"));
     }
@@ -1214,8 +1192,6 @@ mod tests {
         }
     }
 
-    /// `get_status` exists to explain an empty answer, and "the language server is disabled" is
-    /// exactly such an answer, so it has to survive memory-only mode.
     #[test]
     fn get_status_is_routed_in_both_modes() {
         for memory_only in [false, true] {
