@@ -1,3 +1,4 @@
+mod descriptions;
 mod requests;
 mod results;
 
@@ -162,9 +163,8 @@ impl Biskit {
         self.inner.language_server.stop().await;
     }
 
-    #[tool(
-        description = "Returns Biskit's usage manual and the index of memories stored for this project. Call this before using any other Biskit tool."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(initial_instructions)]
     async fn initial_instructions(
         &self,
         Parameters(NoArguments {}): Parameters<NoArguments>,
@@ -180,7 +180,8 @@ impl Biskit {
         ))
     }
 
-    #[tool(description = "Lists the names of every memory stored for this project.")]
+    #[tool]
+    #[doc = descriptions::description!(list_memories)]
     async fn list_memories(
         &self,
         Parameters(NoArguments {}): Parameters<NoArguments>,
@@ -191,7 +192,8 @@ impl Biskit {
         )
     }
 
-    #[tool(description = "Reads the full markdown content of one memory.")]
+    #[tool]
+    #[doc = descriptions::description!(read_memory)]
     async fn read_memory(&self, Parameters(request): Parameters<MemoryNameRequest>) -> ToolResult {
         self.text(
             self.inner
@@ -201,9 +203,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Writes a memory recording durable knowledge about this project, in markdown. Use a meaningful, nestable name. Errors if the name is taken unless overwrite is set."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(create_memory)]
     async fn create_memory(
         &self,
         Parameters(request): Parameters<CreateMemoryRequest>,
@@ -221,7 +222,8 @@ impl Biskit {
         self.text(format!("{verb} memory {}.", outcome.memory))
     }
 
-    #[tool(description = "Deletes a memory.")]
+    #[tool]
+    #[doc = descriptions::description!(delete_memory)]
     async fn delete_memory(
         &self,
         Parameters(request): Parameters<MemoryNameRequest>,
@@ -234,9 +236,8 @@ impl Biskit {
         self.text(format!("Deleted memory {name}."))
     }
 
-    #[tool(
-        description = "Replaces content matching a regular expression inside an existing memory. Prefer this over rewriting a memory wholesale."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(edit_memory)]
     async fn edit_memory(&self, Parameters(request): Parameters<EditMemoryRequest>) -> ToolResult {
         let outcome = self
             .inner
@@ -254,9 +255,8 @@ impl Biskit {
         ))
     }
 
-    #[tool(
-        description = "Renames or moves a memory, rewriting every `mem:` reference to it in other memories."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(rename_memory)]
     async fn rename_memory(
         &self,
         Parameters(request): Parameters<RenameMemoryRequest>,
@@ -276,9 +276,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Lists files and directories under a project-relative path. Paths the ignore set hides are left out, which is .gitignore while project.respect_gitignore is on, plus anything in project.ignored_paths. Naming an ignored directory as relative_path lists it anyway."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(list_dir)]
     async fn list_dir(&self, Parameters(request): Parameters<ListDirRequest>) -> ToolResult {
         self.ok(
             "list_dir",
@@ -290,9 +289,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Finds files whose name matches a glob mask. Paths the ignore set hides are left out, which is .gitignore while project.respect_gitignore is on, plus anything in project.ignored_paths. Naming an ignored directory as relative_path searches it anyway."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(find_file)]
     async fn find_file(&self, Parameters(request): Parameters<FindFileRequest>) -> ToolResult {
         self.ok(
             "find_file",
@@ -304,9 +302,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Searches file contents with a regular expression. Use this for text that is not a symbol; use find_symbol for definitions. Set mode to \"files\" for just the paths that match or \"counts\" for a match count per file, both of which cost far less than snippets. \".\" stops at the end of a line unless dot_matches_newline is set. Paths the ignore set hides are left out, which is .gitignore while project.respect_gitignore is on, plus anything in project.ignored_paths; naming an ignored directory as relative_path searches it anyway."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(search_for_pattern)]
     async fn search_for_pattern(
         &self,
         Parameters(request): Parameters<SearchForPatternRequest>,
@@ -331,9 +328,8 @@ impl Biskit {
         self.ok("search_for_pattern", &result)
     }
 
-    #[tool(
-        description = "Lists the symbols defined in a Luau file. Use this before reading a file to decide what is worth reading."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_symbols_overview)]
     async fn get_symbols_overview(
         &self,
         Parameters(request): Parameters<SymbolsOverviewRequest>,
@@ -353,9 +349,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Finds symbols by name path across the project or within one file or directory."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(find_symbol)]
     async fn find_symbol(
         &self,
         Parameters(request): Parameters<FindSymbolRequestInput>,
@@ -387,9 +382,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Finds where a symbol is declared. name_path only resolves against symbols the named file declares, so point at a call site with line and column to follow a symbol into the file that declares it."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(find_declaration)]
     async fn find_declaration(
         &self,
         Parameters(request): Parameters<FindDeclarationRequest>,
@@ -412,7 +406,8 @@ impl Biskit {
         )
     }
 
-    #[tool(description = "Finds every symbol that references the given symbol.")]
+    #[tool]
+    #[doc = descriptions::description!(find_referencing_symbols)]
     async fn find_referencing_symbols(
         &self,
         Parameters(request): Parameters<SymbolLocationRequest>,
@@ -432,9 +427,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Gets diagnostics for a file, optionally limited to a line range, grouped by severity and containing symbol."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_file_diagnostics)]
     async fn get_file_diagnostics(
         &self,
         Parameters(request): Parameters<FileDiagnosticsRequest>,
@@ -456,9 +450,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Gets diagnostics for one symbol and, optionally, for every file that references it. Use after editing a symbol."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_symbol_diagnostics)]
     async fn get_symbol_diagnostics(
         &self,
         Parameters(request): Parameters<SymbolDiagnosticsRequest>,
@@ -480,9 +473,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Explains what a symbol resolves to: the type the language server inferred for it, not the type written in the source. Point at it with name_path or with line and column."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(explain_symbol)]
     async fn explain_symbol(
         &self,
         Parameters(request): Parameters<ExplainSymbolRequest>,
@@ -500,9 +492,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Finds where a type is declared, which is usually an `export type` in another module. Point line and column at the type's own name in an annotation. Use find_declaration instead for where a value is declared."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_type_definition)]
     async fn get_type_definition(
         &self,
         Parameters(request): Parameters<TypeDefinitionRequest>,
@@ -525,9 +516,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Lists the inferred types the language server would draw inline over a line range. The cheapest way to see what a function's variables, arguments, and returns resolve to without reading its body."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_inlay_hints)]
     async fn get_inlay_hints(
         &self,
         Parameters(request): Parameters<InlayHintsRequest>,
@@ -547,9 +537,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Reports the parameters of a call without reading the callee. Aim line and column inside the parentheses of the call; the result names which argument that position is."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_signature_help)]
     async fn get_signature_help(
         &self,
         Parameters(request): Parameters<ExplainSymbolRequest>,
@@ -567,9 +556,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Translates between the Roblox DataModel and the files on disk, in either direction. Pass instance_path to find the file behind game.ReplicatedStorage.Shared.Combat, or relative_path to find where a file ends up in the game. Use this before assuming a file's instance path."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(resolve_instance_path)]
     async fn resolve_instance_path(
         &self,
         Parameters(request): Parameters<ResolveInstancePathRequest>,
@@ -591,9 +579,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Reports which modules a module requires and which modules require it, resolved through the sourcemap rather than by text search. Omit relative_path for a project-wide answer naming every require cycle and every require that could not be resolved. Use this before editing a module, because find_referencing_symbols sees symbol uses and not module-level coupling."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_require_graph)]
     async fn get_require_graph(
         &self,
         Parameters(request): Parameters<RequireGraphRequest>,
@@ -633,9 +620,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Orients you on one module in a single call: its instance path, whether it runs on the server, the client, or both, what it requires, what requires it, what its returned table exposes, and how many diagnostics it carries. Call this when you open a module you have not seen before, instead of four or five separate calls."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_module_context)]
     async fn get_module_context(
         &self,
         Parameters(request): Parameters<ModuleContextRequest>,
@@ -653,9 +639,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Looks up the real Roblox API from the type definitions Biskit already caches: the members of a class, the signature and documentation of one member, whether something is deprecated and what replaced it, or the items of an enum. Use this instead of recalling the Roblox API from memory."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(query_roblox_api)]
     async fn query_roblox_api(
         &self,
         Parameters(request): Parameters<RobloxApiRequest>,
@@ -681,9 +666,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Reports what Biskit is working with: project root, language server state, sourcemap freshness, memory count, and settings that differ from the defaults. Call this when a tool returns nothing and you cannot tell whether that means no matches."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_status)]
     async fn get_status(&self, Parameters(NoArguments {}): Parameters<NoArguments>) -> ToolResult {
         let status = status::collect(
             &self.inner.language_server,
@@ -696,9 +680,8 @@ impl Biskit {
         self.ok("get_status", &status)
     }
 
-    #[tool(
-        description = "Restarts the Luau language server. Use when symbol results look stale or empty for a file you know has symbols."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(restart_language_server)]
     async fn restart_language_server(
         &self,
         Parameters(NoArguments {}): Parameters<NoArguments>,
