@@ -293,8 +293,8 @@ intelligence at all:
   that are unavailable.
 - `biskit-mcp doctor` reports the mode and skips every LSP check.
 
-Memory, `list_dir`, `find_file`, and `search_for_pattern` keep working. Put it in
-`settings.local.yml` to turn it on for yourself only.
+Memory, `list_dir`, `find_file`, `search_for_pattern`, `initial_instructions`, and `get_status` keep
+working. Put it in `settings.local.yml` to turn it on for yourself only.
 
 ## Commands
 
