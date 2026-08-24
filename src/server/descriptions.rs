@@ -77,7 +77,9 @@ macro_rules! description {
     };
     (get_signature_help) => {
         "Reports a call's parameters without reading the callee. Aim line and column inside the \
-         call's parentheses; the result names which argument that position is."
+         call's parentheses; the result names which argument that position is. The label is the \
+         language server's own rendering of the call, so for a variadic callee such as print the \
+         parameter names come from the call site rather than the callee."
     };
     (resolve_instance_path) => {
         "Maps between the Roblox DataModel and files on disk, either direction. Pass instance_path \
