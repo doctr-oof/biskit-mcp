@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
@@ -54,6 +55,7 @@ pub struct Session {
     documents: Mutex<HashMap<PathBuf, OpenDocument>>,
     drain: JoinHandle<()>,
     sourcemap_watch: std::sync::Mutex<Option<JoinHandle<()>>>,
+    alive: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -78,13 +80,19 @@ impl Session {
         .await?;
 
         let ready = Arc::new(tokio::sync::Notify::new());
-        let drain = tokio::spawn(drain_events(receiver, Arc::clone(&ready)));
+        let alive = Arc::new(AtomicBool::new(true));
+        let drain = tokio::spawn(drain_events(
+            receiver,
+            Arc::clone(&ready),
+            Arc::clone(&alive),
+        ));
 
         let session = Arc::new(Self {
             connection,
             documents: Mutex::new(HashMap::new()),
             drain,
             sourcemap_watch: std::sync::Mutex::new(None),
+            alive,
         });
 
         session
@@ -396,7 +404,13 @@ impl Session {
             .await
     }
 
+    /// False once the child process has gone, so a caller can replace the session rather than wait on it.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
+
     pub async fn shutdown(&self) {
+        self.alive.store(false, Ordering::Release);
         self.drain.abort();
         if let Ok(mut guard) = self.sourcemap_watch.lock()
             && let Some(watch) = guard.take()
@@ -463,6 +477,7 @@ fn build_arguments(
 async fn drain_events(
     mut receiver: mpsc::UnboundedReceiver<ServerEvent>,
     ready: Arc<tokio::sync::Notify>,
+    alive: Arc<AtomicBool>,
 ) {
     while let Some(event) = receiver.recv().await {
         match event {
@@ -473,11 +488,13 @@ async fn drain_events(
                 tracing::debug!(target: "biskit::lsp", "{message}");
             }
             ServerEvent::Exited => {
+                alive.store(false, Ordering::Release);
                 tracing::warn!(target: "biskit::lsp", "language server exited");
                 return;
             }
         }
     }
+    alive.store(false, Ordering::Release);
 }
 
 fn spawn_sourcemap_watch(
@@ -490,6 +507,10 @@ fn spawn_sourcemap_watch(
     }
     let relative = settings.lsp.sourcemap.as_ref()?;
     let sourcemap = project.resolve(relative).ok()?;
+    if let Err(error) = uri::from_path(&sourcemap) {
+        tracing::warn!(target: "biskit::lsp", "sourcemap cannot be watched: {error}");
+        return None;
+    }
 
     Some(tokio::spawn(async move {
         let mut last_seen = modified_at(&sourcemap).await;
@@ -502,11 +523,11 @@ fn spawn_sourcemap_watch(
             if current == last_seen {
                 continue;
             }
-            last_seen = current;
             if let Err(error) = session.notify_sourcemap_changed(&sourcemap).await {
                 tracing::warn!(target: "biskit::lsp", "sourcemap notification failed: {error}");
-                return;
+                continue;
             }
+            last_seen = current;
             tracing::debug!(target: "biskit::lsp", "sourcemap change forwarded");
         }
     }))
@@ -532,6 +553,7 @@ pub enum ServerState {
     Running,
     NotStarted,
     Starting,
+    Crashed,
 }
 
 impl ServerState {
@@ -541,6 +563,7 @@ impl ServerState {
             Self::Running => "running",
             Self::NotStarted => "not started",
             Self::Starting => "starting",
+            Self::Crashed => "exited, restarts on the next request",
         }
     }
 }
@@ -602,8 +625,18 @@ impl LanguageServerHandle {
         }
 
         let mut guard = self.session.lock().await;
-        if let Some(existing) = guard.as_ref() {
-            return Ok(Arc::clone(existing));
+        match guard.as_ref() {
+            Some(existing) if existing.is_alive() => return Ok(Arc::clone(existing)),
+            Some(_) => {
+                tracing::warn!(
+                    target: "biskit::lsp",
+                    "the language server had exited, starting a replacement"
+                );
+                if let Some(dead) = guard.take() {
+                    dead.shutdown().await;
+                }
+            }
+            None => {}
         }
 
         let started = Instant::now();
@@ -639,8 +672,11 @@ impl LanguageServerHandle {
             return ServerState::Disabled;
         }
         match self.session.try_lock() {
-            Ok(guard) if guard.is_some() => ServerState::Running,
-            Ok(_) => ServerState::NotStarted,
+            Ok(guard) => match guard.as_ref() {
+                Some(session) if session.is_alive() => ServerState::Running,
+                Some(_) => ServerState::Crashed,
+                None => ServerState::NotStarted,
+            },
             Err(_) => ServerState::Starting,
         }
     }
