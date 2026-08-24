@@ -314,8 +314,12 @@ fn truncate_listing(directories: &mut Vec<String>, files: &mut Vec<String>, limi
     if directories.len() + files.len() <= limit {
         return false;
     }
-    directories.truncate(limit);
-    files.truncate(limit - directories.len());
+
+    let half = directories.len().min(limit / 2);
+    let keep_files = files.len().min(limit - half);
+    let keep_directories = directories.len().min(limit - keep_files);
+    directories.truncate(keep_directories);
+    files.truncate(keep_files);
     true
 }
 
@@ -448,6 +452,33 @@ mod tests {
             ]
         );
         assert_eq!(listing.files, files.list_dir(".", false).unwrap().files);
+    }
+
+    #[test]
+    fn directories_cannot_spend_the_whole_listing_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..8 {
+            std::fs::create_dir_all(dir.path().join(format!("Folder{index}"))).unwrap();
+        }
+        for index in 0..8 {
+            std::fs::write(
+                dir.path().join(format!("Module{index}.luau")),
+                "return {}\n",
+            )
+            .unwrap();
+        }
+
+        let mut settings = Settings::default();
+        settings.tools.max_listing_entries = 4;
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), settings);
+
+        let listing = files.list_dir(".", false).unwrap();
+        assert!(listing.truncated);
+        assert_eq!(listing.directories.len() + listing.files.len(), 4);
+        assert!(
+            !listing.files.is_empty(),
+            "directories must not starve the files out of the listing"
+        );
     }
 
     #[test]
