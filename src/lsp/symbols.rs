@@ -89,13 +89,18 @@ fn span(range: Range) -> (u32, u32) {
     (lines, range.end.character)
 }
 
+/// Bytes that carry on an identifier, so a name matched inside a longer one can be rejected.
+pub fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 /// Finds `needle` in `haystack` only where it stands alone as an identifier.
-fn find_identifier(haystack: &str, needle: &str) -> Option<usize> {
+pub fn find_identifier(haystack: &str, needle: &str) -> Option<usize> {
     if needle.is_empty() {
         return None;
     }
     let bytes = haystack.as_bytes();
-    let boundary = |byte: u8| !(byte.is_ascii_alphanumeric() || byte == b'_');
+    let boundary = |byte: u8| !is_identifier_byte(byte);
 
     let mut from = 0;
     while let Some(found) = haystack[from..].find(needle) {

@@ -31,6 +31,7 @@ fn request(name: &str, substring: bool) -> FindSymbolRequest {
         depth: 0,
         include_body: false,
         include_detail: false,
+        include_locals: false,
         include_kinds: Vec::new(),
         exclude_kinds: Vec::new(),
         substring_matching: substring,
@@ -219,13 +220,14 @@ async fn an_edited_file_is_not_answered_from_the_tree_stored_for_it() {
 /// A symbol the project actually defines, so the "name that exists" case has something to look for.
 async fn first_defined_symbol(handle: &LanguageServerHandle, files: &[String]) -> Option<String> {
     for file in files.iter().take(25) {
-        let Ok(symbols) = SymbolQuery::new(handle)
-            .symbols_overview(file, 0, false)
+        let Ok(overview) = SymbolQuery::new(handle)
+            .symbols_overview(file, 0, false, false)
             .await
         else {
             continue;
         };
-        if let Some(name) = symbols
+        if let Some(name) = overview
+            .symbols
             .iter()
             .filter_map(|symbol| symbol.name_path.as_deref())
             .filter_map(|path| path.rsplit('/').next())

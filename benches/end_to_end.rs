@@ -110,6 +110,7 @@ async fn run(root: &str) -> anyhow::Result<()> {
                 depth: 0,
                 include_body: false,
                 include_detail: false,
+                include_locals: false,
                 include_kinds: Vec::new(),
                 exclude_kinds: Vec::new(),
                 substring_matching: substring,

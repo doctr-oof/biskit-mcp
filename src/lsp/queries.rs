@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -6,13 +6,13 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use super::client;
-use super::name_path::NamePathPattern;
+use super::name_path::{NamePathPattern, strip_overload_suffix};
 use super::protocol::{
     Diagnostic, Documentation, InlayHint, Location, Position, Range, Severity, SignatureHelp,
     inlay_hint_kind_label, is_low_level_kind,
 };
 use super::session::{LanguageServerHandle, Session, ensure_luau_file};
-use super::symbols::SymbolNode;
+use super::symbols::{SymbolNode, find_identifier, is_identifier_byte};
 use super::uri;
 use crate::bail_hint;
 use crate::lines::LineIndex;
@@ -53,6 +53,26 @@ const NO_SIGNATURES_NOTE: &str = "the language server answered with no signature
                                   line and column at an argument position rather than at the \
                                   function's declaration.";
 
+/// Ceiling on the hover requests one answer spends filling `detail`. Detail is already opt-in, but
+/// a deep tree over a large file would otherwise cost one round trip per symbol with no bound.
+const MAX_DETAIL_HOVERS: usize = 200;
+
+const DETAIL_CAPPED_NOTE: &str = "detail was filled for the first symbols only: one hover request \
+                                  per symbol is spent resolving a signature, and this answer hit \
+                                  the ceiling. Narrow the answer with relative_path or a lower \
+                                  depth, or ask explain_symbol about the symbols still missing a \
+                                  detail.";
+
+const SELF_REFERENCE_NOTE: &str = "references marked resolved_by \"text\" were found by scanning \
+                                   the declaring file for `self:` and `self.` uses. luau-lsp types \
+                                   the implicit self of a colon-declared method as a fresh generic \
+                                   rather than as the owner, so it reports no reference for those \
+                                   call sites. They are matched on the symbol's own name, so \
+                                   confirm the receiver before treating one as a call site.";
+
+/// Marks a reference the text scan recovered rather than the language server reported.
+const TEXT_RESOLUTION: &str = "text";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolMatch {
     /// Absent when the location falls outside every symbol in its file.
@@ -67,6 +87,15 @@ pub struct SymbolMatch {
     pub body: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<SymbolMatch>,
+    /// Children the low-level kind filter dropped, so a symbol that declares locals is never
+    /// reported as declaring nothing. Pass `include_locals: true` to see them instead of count
+    /// them. Omitted when nothing was dropped.
+    #[serde(skip_serializing_if = "crate::json::is_zero")]
+    pub omitted_children: usize,
+    /// Where to aim a hover to fill `detail`. A means to the answer rather than part of it, so it
+    /// never reaches the caller.
+    #[serde(skip)]
+    pub hover_at: Option<Position>,
 }
 
 /// Symbols keyed by the file that defines them, so a path is spelled once per file rather than
@@ -79,6 +108,19 @@ pub struct SymbolSearchResult {
     /// True when `max_matches` cut the result set short. Omitted when false.
     #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
+    /// Set only when the detail budget ran out before every symbol carried one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// The symbols of one file, in the shape `get_symbols_overview` answers with. The file was named
+/// by the caller, so the symbols need no path key; the note is what the bare list had nowhere to
+/// put.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SymbolOverviewResult {
+    pub symbols: Vec<SymbolMatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,6 +129,10 @@ pub struct ReferenceMatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub containing_symbol: Option<String>,
     pub snippet: String,
+    /// Set to "text" on a reference the `self:` scan recovered rather than the language server
+    /// reported. Omitted on everything the language server resolved itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<&'static str>,
 }
 
 /// References keyed by the file they appear in, on the same reasoning as `SymbolsByFile`.
@@ -98,6 +144,9 @@ pub struct ReferenceSearchResult {
     /// True when `max_reference_matches` cut the result set short. Omitted when false.
     #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
+    /// Set only when the answer carries a reference the text scan recovered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Severity is deliberately absent: it is already the key of the map this entry sits under.
@@ -283,13 +332,15 @@ pub struct SymbolQuery<'a> {
     pub handle: &'a LanguageServerHandle,
 }
 
-/// What a rendered symbol carries beyond its name, kind, and line range. `detail` is the language
-/// server's type signature, which is long enough to be worth asking for rather than assuming.
+/// What a rendered symbol carries beyond its name, kind, and line range. `detail` is the symbol's
+/// resolved signature, which is long enough to be worth asking for rather than assuming.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RenderOptions {
     pub depth: u32,
     pub include_body: bool,
     pub include_detail: bool,
+    /// Descend into locals declared inside a body, which are pruned by default as noise.
+    pub include_locals: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +350,7 @@ pub struct FindSymbolRequest {
     pub depth: u32,
     pub include_body: bool,
     pub include_detail: bool,
+    pub include_locals: bool,
     pub include_kinds: Vec<u32>,
     pub exclude_kinds: Vec<u32>,
     pub substring_matching: bool,
@@ -352,6 +404,8 @@ impl<'a> SymbolQuery<'a> {
         // from a truncated one.
         let probe = request.max_matches.saturating_add(1);
         let mut matches: Vec<(String, SymbolMatch)> = Vec::new();
+        let mut budget = MAX_DETAIL_HOVERS;
+        let mut capped = false;
 
         for path in files {
             if matches.len() >= probe {
@@ -379,6 +433,9 @@ impl<'a> SymbolQuery<'a> {
                 &lines,
                 &mut found,
             );
+            if request.include_detail {
+                capped |= attach_details(&session, &path, &mut found, &mut budget).await;
+            }
             matches.extend(found.into_iter().map(|symbol| (relative.clone(), symbol)));
         }
 
@@ -387,6 +444,7 @@ impl<'a> SymbolQuery<'a> {
         Ok(SymbolSearchResult {
             symbols: group_by_file(matches),
             truncated,
+            note: capped.then(|| DETAIL_CAPPED_NOTE.to_string()),
         })
     }
 
@@ -395,7 +453,8 @@ impl<'a> SymbolQuery<'a> {
         relative_path: &str,
         depth: u32,
         include_detail: bool,
-    ) -> Result<Vec<SymbolMatch>> {
+        include_locals: bool,
+    ) -> Result<SymbolOverviewResult> {
         let path = self.project().resolve(relative_path)?;
         ensure_luau_file(&path)?;
 
@@ -407,14 +466,24 @@ impl<'a> SymbolQuery<'a> {
             depth,
             include_body: false,
             include_detail,
+            include_locals,
         };
 
         // Low-level kinds are pruned from children, not from the top level: a module whose
         // only top-level symbols are variables would otherwise look like an empty file.
-        Ok(symbols
+        let mut rendered: Vec<SymbolMatch> = symbols
             .iter()
             .map(|symbol| render(symbol, &lines, options))
-            .collect())
+            .collect();
+
+        let mut budget = MAX_DETAIL_HOVERS;
+        let capped =
+            include_detail && attach_details(&session, &path, &mut rendered, &mut budget).await;
+
+        Ok(SymbolOverviewResult {
+            symbols: rendered,
+            note: capped.then(|| DETAIL_CAPPED_NOTE.to_string()),
+        })
     }
 
     /// Resolves a name path to exactly one symbol, erroring when the pattern is ambiguous.
@@ -553,6 +622,7 @@ impl<'a> SymbolQuery<'a> {
         }
 
         Ok(SymbolExplanation {
+            signature: strip_unbound_generics(&signature),
             relative_path: resolved.relative_path,
             line: resolved.position.line + 1,
             column: resolved.position.character + 1,
@@ -564,7 +634,6 @@ impl<'a> SymbolQuery<'a> {
                 .symbol
                 .as_ref()
                 .map(|symbol| symbol.kind_label().to_string()),
-            signature,
             documentation: include_documentation
                 .then(|| cap_documentation(documentation))
                 .filter(|text| !text.is_empty()),
@@ -874,11 +943,14 @@ impl<'a> SymbolQuery<'a> {
                 depth: 0,
                 include_body,
                 include_detail,
+                include_locals: false,
             };
-            return Ok(SymbolsByFile::from([(
-                relative,
-                vec![render(&symbol, &LineIndex::new(&content), options)],
-            )]));
+            let mut rendered = vec![render(&symbol, &LineIndex::new(&content), options)];
+            if include_detail {
+                let mut budget = MAX_DETAIL_HOVERS;
+                attach_details(&session, &path, &mut rendered, &mut budget).await;
+            }
+            return Ok(SymbolsByFile::from([(relative, rendered)]));
         }
 
         self.render_locations(&session, locations, include_body, include_detail)
@@ -893,9 +965,16 @@ impl<'a> SymbolQuery<'a> {
         context_lines: usize,
     ) -> Result<ReferenceSearchResult> {
         let session = self.handle.session().await?;
-        let (path, _, position) = self.locate_one(&session, name_path, relative_path).await?;
-        self.references_at(&session, &path, position, max_results, context_lines)
-            .await
+        let (path, symbol, position) = self.locate_one(&session, name_path, relative_path).await?;
+        self.references_at(
+            &session,
+            &path,
+            position,
+            Some(&symbol),
+            max_results,
+            context_lines,
+        )
+        .await
     }
 
     /// `find_referencing_symbols` from a position that has already been resolved.
@@ -904,6 +983,7 @@ impl<'a> SymbolQuery<'a> {
         session: &Session,
         path: &Path,
         position: Position,
+        symbol: Option<&SymbolNode>,
         max_results: usize,
         context_lines: usize,
     ) -> Result<ReferenceSearchResult> {
@@ -914,15 +994,42 @@ impl<'a> SymbolQuery<'a> {
         let probe = max_results.saturating_add(1);
         let mut references: Vec<(String, ReferenceMatch)> = Vec::new();
 
-        let wanted: Vec<Location> = locations
+        let mut wanted: Vec<Location> = locations
             .into_iter()
             .filter(|location| !is_declaration_site(location, path, position))
             .collect();
 
+        let reported: HashSet<u32> = wanted
+            .iter()
+            .filter(|location| uri::to_path(&location.uri).is_ok_and(|target| target == path))
+            .map(|location| location.range.start.line)
+            .collect();
+        let recovered = self
+            .self_receiver_locations(session, path, symbol, &reported)
+            .await?;
+        let recovered_lines: HashSet<u32> = recovered
+            .iter()
+            .map(|location| location.range.start.line)
+            .collect();
+        wanted.extend(recovered);
+
+        let mut grouped = group_locations_by_file(wanted);
+        // The recovered locations were appended after everything the server reported, so the file
+        // they belong to is the one file whose references are no longer in source order.
+        if !recovered_lines.is_empty()
+            && let Some((_, group)) = grouped
+                .iter_mut()
+                .find(|(target, _)| target.as_path() == path)
+        {
+            group.sort_by_key(|location| {
+                (location.range.start.line, location.range.start.character)
+            });
+        }
+
         // Forty references spread over five files are five files' worth of information. Reading
         // and re-requesting the symbol tree once per reference asked the server for the same file
         // as many times as it happened to appear.
-        'files: for (target, group) in group_locations_by_file(wanted) {
+        'files: for (target, group) in grouped {
             if references.len() >= probe {
                 break;
             }
@@ -934,6 +1041,7 @@ impl<'a> SymbolQuery<'a> {
                 continue;
             };
             let lines = LineIndex::new(&content);
+            let declaring = target.as_path() == path;
 
             for location in group {
                 if references.len() >= probe {
@@ -948,6 +1056,9 @@ impl<'a> SymbolQuery<'a> {
                         line: location.range.start.line + 1,
                         containing_symbol: containing,
                         snippet: snippet_around(&lines, location.range.start.line, context_lines),
+                        resolved_by: (declaring
+                            && recovered_lines.contains(&location.range.start.line))
+                        .then_some(TEXT_RESOLUTION),
                     },
                 ));
             }
@@ -955,10 +1066,55 @@ impl<'a> SymbolQuery<'a> {
 
         let truncated = references.len() > max_results;
         references.truncate(max_results);
+        let recovered_kept = references
+            .iter()
+            .any(|(_, reference)| reference.resolved_by.is_some());
         Ok(ReferenceSearchResult {
             references: group_by_file(references),
             truncated,
+            note: recovered_kept.then(|| SELF_REFERENCE_NOTE.to_string()),
         })
+    }
+
+    /// Call sites that reach the symbol through `self`, which the language server does not resolve.
+    ///
+    /// luau-lsp types the implicit `self` of a colon-declared method as a fresh generic rather than
+    /// as the owner table, so `self:Method()` binds to nothing and never reaches a references
+    /// answer; a private helper called only that way reports zero references and reads as dead
+    /// code. The same inference is what puts an unbound `<a>` in the method's hover.
+    ///
+    /// The scan is confined to the declaring file, because that is the only file `self` reliably
+    /// names the owner in. Widening it would trade the silent miss for the same false positives
+    /// that make grep the wrong tool for this.
+    async fn self_receiver_locations(
+        &self,
+        session: &Session,
+        path: &Path,
+        symbol: Option<&SymbolNode>,
+        reported_lines: &HashSet<u32>,
+    ) -> Result<Vec<Location>> {
+        // A symbol with no owner is not reachable through `self` in the first place.
+        let Some(symbol) = symbol.filter(|node| node.name_path.contains('/')) else {
+            return Ok(Vec::new());
+        };
+
+        let content = session.ensure_open(path).await?.content;
+        let blanked = crate::roblox::requires::blank_comments(&content);
+        let uri = uri::from_path(path)?;
+
+        Ok(
+            self_receiver_positions(&blanked, strip_overload_suffix(&symbol.name))
+                .into_iter()
+                .filter(|position| !reported_lines.contains(&position.line))
+                .map(|position| Location {
+                    uri: uri.clone(),
+                    range: Range {
+                        start: position,
+                        end: position,
+                    },
+                })
+                .collect(),
+        )
     }
 
     async fn render_locations(
@@ -969,6 +1125,7 @@ impl<'a> SymbolQuery<'a> {
         include_detail: bool,
     ) -> Result<SymbolsByFile> {
         let mut rendered = SymbolsByFile::new();
+        let mut budget = MAX_DETAIL_HOVERS;
         for (target, group) in group_locations_by_file(locations) {
             let Ok(relative) = self.project().relativize(&target) else {
                 continue;
@@ -980,31 +1137,32 @@ impl<'a> SymbolQuery<'a> {
                 .unwrap_or_else(|_| (Vec::new(), Arc::from("")));
             let lines = LineIndex::new(&content);
 
+            let mut here: Vec<SymbolMatch> = Vec::new();
             for location in group {
                 let node = SymbolNode::innermost_at(&symbols, location.range.start);
-                rendered
-                    .entry(relative.clone())
-                    .or_default()
-                    .push(SymbolMatch {
-                        name_path: node.map(|found| found.name_path.clone()),
-                        kind: node
-                            .map(|found| found.kind_label().to_string())
-                            .unwrap_or_else(|| "Unknown".to_string()),
-                        start_line: location.range.start.line + 1,
-                        end_line: location.range.end.line + 1,
-                        detail: include_detail
-                            .then(|| node.and_then(|found| found.detail.clone()))
-                            .flatten(),
-                        body: include_body.then(|| {
-                            snippet_around(
-                                &lines,
-                                location.range.start.line,
-                                DECLARATION_CONTEXT_LINES,
-                            )
-                        }),
-                        children: Vec::new(),
-                    });
+                here.push(SymbolMatch {
+                    name_path: node.map(|found| found.name_path.clone()),
+                    kind: node
+                        .map(|found| found.kind_label().to_string())
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    start_line: location.range.start.line + 1,
+                    end_line: location.range.end.line + 1,
+                    detail: None,
+                    body: include_body.then(|| {
+                        snippet_around(&lines, location.range.start.line, DECLARATION_CONTEXT_LINES)
+                    }),
+                    children: Vec::new(),
+                    omitted_children: 0,
+                    // The location is what the caller asked about, so it is what a hover for
+                    // `detail` has to aim at; the containing symbol is only context on it.
+                    hover_at: include_detail.then_some(location.range.start),
+                });
             }
+
+            if include_detail {
+                attach_details(session, &target, &mut here, &mut budget).await;
+            }
+            rendered.entry(relative).or_default().extend(here);
         }
         Ok(rendered)
     }
@@ -1277,6 +1435,154 @@ fn split_hover(markdown: &str) -> (String, String) {
     (signature.join("\n").trim().to_string(), prose)
 }
 
+/// Drops type parameters the language server inferred but the signature never goes on to use.
+///
+/// A method declared with colon syntax has an implicit `self`, which luau-lsp types as a fresh
+/// generic rather than as the owner table, so hover reports `function Owner:Method<a>(...)` for a
+/// signature whose source declares no generics at all. `get_signature_help` does not carry the
+/// parameter, so the two tools disagreed about one symbol. A generic the signature does go on to
+/// mention is load-bearing and is kept.
+fn strip_unbound_generics(signature: &str) -> String {
+    let Some((open, close)) = generic_list(signature) else {
+        return signature.to_string();
+    };
+
+    let parameters = split_generics(&signature[open + 1..close]);
+    if parameters.is_empty() {
+        return signature.to_string();
+    }
+
+    let outside = format!("{}{}", &signature[..open], &signature[close + 1..]);
+    let kept: Vec<&str> = parameters
+        .iter()
+        .copied()
+        .filter(|parameter| !is_unbound_generic(parameter, &outside))
+        .collect();
+
+    if kept.len() == parameters.len() {
+        return signature.to_string();
+    }
+    if kept.is_empty() {
+        return outside;
+    }
+    format!(
+        "{}<{}>{}",
+        &signature[..open],
+        kept.join(", "),
+        &signature[close + 1..]
+    )
+}
+
+/// Byte range of the `<...>` a function name carries, which is the only angle bracket pair a
+/// declared generic list can sit in. Anything after the first `(` is a parameter or a return type.
+fn generic_list(signature: &str) -> Option<(usize, usize)> {
+    let limit = signature.find('(').unwrap_or(signature.len());
+    let bytes = signature.as_bytes();
+    let open = signature[..limit].find('<')?;
+    if open == 0 || !is_identifier_byte(bytes[open - 1]) {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (index, byte) in bytes.iter().enumerate().skip(open).take(limit - open) {
+        match byte {
+            b'<' => depth += 1,
+            b'>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((open, index));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Splits a generic list on the commas that separate its own parameters, leaving the ones nested
+/// inside a parameter's own type where they are.
+fn split_generics(list: &str) -> Vec<&str> {
+    let mut parameters = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+
+    for (index, character) in list.char_indices() {
+        match character {
+            '<' | '(' | '{' | '[' => depth += 1,
+            '>' | ')' | '}' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parameters.push(list[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+
+    let last = list[start..].trim();
+    if !last.is_empty() {
+        parameters.push(last);
+    }
+    parameters.retain(|parameter| !parameter.is_empty());
+    parameters
+}
+
+/// Whether a generic parameter is a bare name the rest of the signature never mentions.
+///
+/// A parameter carrying a default is written out in the source, whatever the signature does with
+/// it, so only bare names and bare packs are candidates for removal.
+fn is_unbound_generic(parameter: &str, outside: &str) -> bool {
+    let name = parameter.strip_suffix("...").unwrap_or(parameter);
+    if name.is_empty() || name.as_bytes()[0].is_ascii_digit() {
+        return false;
+    }
+    if !name.bytes().all(is_identifier_byte) {
+        return false;
+    }
+    find_identifier(outside, name).is_none()
+}
+
+/// Positions of `self:name` and `self.name` in source whose comments are already blanked.
+fn self_receiver_positions(blanked: &str, name: &str) -> Vec<Position> {
+    if name.is_empty() {
+        return Vec::new();
+    }
+
+    let lines = LineIndex::new(blanked);
+    let bytes = blanked.as_bytes();
+    let mut found = Vec::new();
+    let mut from = 0;
+
+    while let Some(offset) = blanked[from..].find("self") {
+        let start = from + offset;
+        from = start + "self".len();
+
+        if start > 0 && is_identifier_byte(bytes[start - 1]) {
+            continue;
+        }
+        if !matches!(bytes.get(from), Some(b':') | Some(b'.')) {
+            continue;
+        }
+
+        let leaf = from + 1;
+        if !blanked[leaf..].starts_with(name) {
+            continue;
+        }
+        if bytes
+            .get(leaf + name.len())
+            .is_some_and(|byte| is_identifier_byte(*byte))
+        {
+            continue;
+        }
+
+        let (line, column) = lines.position_of(leaf);
+        found.push(Position {
+            line: line as u32,
+            character: column as u32,
+        });
+    }
+    found
+}
+
 /// The `---` luau-lsp puts between the type and the docs is a separator, not documentation.
 fn is_horizontal_rule(line: &str) -> bool {
     let trimmed = line.trim();
@@ -1405,6 +1711,7 @@ fn collect_matches(
                     depth: request.depth,
                     include_body: request.include_body,
                     include_detail: request.include_detail,
+                    include_locals: request.include_locals,
                 },
             ));
         }
@@ -1434,20 +1741,31 @@ fn render_node(
     options: RenderOptions,
     full_name_path: bool,
 ) -> SymbolMatch {
-    let children = if options.depth == 0 {
-        Vec::new()
+    let (children, omitted_children) = if options.depth == 0 {
+        (Vec::new(), 0)
     } else {
         let nested = RenderOptions {
             depth: options.depth - 1,
             ..options
         };
         // A member of a table is part of what the table is, whatever kind the server gave it. The
-        // low-level filter is aimed at locals declared inside a body, which are noise here.
-        node.children
+        // low-level filter is aimed at locals declared inside a body, which are noise by default
+        // and the whole point of the traversal once `include_locals` asks for them.
+        let visible: Vec<&SymbolNode> = node
+            .children
             .iter()
-            .filter(|child| child.member || !is_low_level_kind(child.kind))
-            .map(|child| render_child(child, lines, nested))
-            .collect()
+            .filter(|child| {
+                options.include_locals || child.member || !is_low_level_kind(child.kind)
+            })
+            .collect();
+        let omitted = node.children.len() - visible.len();
+        (
+            visible
+                .into_iter()
+                .map(|child| render_child(child, lines, nested))
+                .collect(),
+            omitted,
+        )
     };
 
     let name = if full_name_path {
@@ -1461,13 +1779,63 @@ fn render_node(
         kind: node.kind_label().to_string(),
         start_line: node.range.start.line + 1,
         end_line: node.range.end.line + 1,
-        detail: options
-            .include_detail
-            .then(|| node.detail.clone())
-            .flatten(),
+        // Left empty for the hover pass to fill: the server's own `detail` is parameter names with
+        // no types on a function, and nothing at all on anything else.
+        detail: None,
         body: options.include_body.then(|| extract_body(lines, node)),
         children,
+        omitted_children,
+        hover_at: options
+            .include_detail
+            .then(|| node.target_position(lines.content())),
     }
+}
+
+/// Fills `detail` from hover for every rendered symbol carrying a position, depth first.
+///
+/// `DocumentSymbol.detail` is what `include_detail` used to answer with, and luau-lsp populates it
+/// with parameter names for a function and with nothing at all for anything else. Hover is where
+/// the resolved signature lives, so reading it here is what makes `detail` and `explain_symbol`
+/// agree about one symbol instead of disagreeing about it.
+///
+/// Returns whether `budget` ran out with symbols still uncovered, which the caller reports rather
+/// than letting the missing detail read as a server that had nothing to say.
+async fn attach_details(
+    session: &Session,
+    path: &Path,
+    matches: &mut [SymbolMatch],
+    budget: &mut usize,
+) -> bool {
+    let mut pending: Vec<&mut SymbolMatch> = matches.iter_mut().rev().collect();
+    let mut capped = false;
+
+    while let Some(entry) = pending.pop() {
+        let SymbolMatch {
+            detail,
+            hover_at,
+            children,
+            ..
+        } = entry;
+        pending.extend(children.iter_mut().rev());
+
+        let Some(position) = hover_at.take() else {
+            continue;
+        };
+        if *budget == 0 {
+            capped = true;
+            continue;
+        }
+        *budget -= 1;
+
+        let Ok(Some(hover)) = session.hover(path, position).await else {
+            continue;
+        };
+        let (signature, _) = split_hover(&hover.contents.into_markdown());
+        if !signature.is_empty() {
+            *detail = Some(strip_unbound_generics(&signature));
+        }
+    }
+    capped
 }
 
 fn extract_body(lines: &LineIndex<'_>, node: &SymbolNode) -> String {
@@ -1833,6 +2201,158 @@ mod tests {
         assert!(documentation.is_empty());
 
         assert_eq!(split_hover(""), (String::new(), String::new()));
+    }
+
+    /// The generic luau-lsp invents for the implicit `self` is the whole reason this exists, so it
+    /// has to go while a generic the signature actually uses stays.
+    #[test]
+    fn an_inferred_generic_is_dropped_and_a_used_one_is_kept() {
+        assert_eq!(
+            strip_unbound_generics("function PlayerUtils:GetPlayerMaid<a>(player: Player): Maid"),
+            "function PlayerUtils:GetPlayerMaid(player: Player): Maid"
+        );
+        assert_eq!(
+            strip_unbound_generics("function Table.find<T>(haystack: {T}, needle: T): number?"),
+            "function Table.find<T>(haystack: {T}, needle: T): number?"
+        );
+        assert_eq!(
+            strip_unbound_generics("function Signal:Fire<T, a>(value: T): ()"),
+            "function Signal:Fire<T>(value: T): ()"
+        );
+        assert_eq!(
+            strip_unbound_generics("function Maid:Give<a...>(): ()"),
+            "function Maid:Give(): ()"
+        );
+    }
+
+    #[test]
+    fn a_signature_with_nothing_to_strip_is_returned_as_written() {
+        for signature in [
+            "local cachedInfo: {\n    Id: number\n}",
+            "function Config.load(path: string): Config",
+            "Instance?",
+            "",
+            "function Pack:Add<T = string>(value: T): ()",
+        ] {
+            assert_eq!(strip_unbound_generics(signature), signature);
+        }
+    }
+
+    /// The comparison operators a condition is written with are not a generic list, and neither is
+    /// an arrow inside a function type.
+    #[test]
+    fn angle_brackets_that_are_not_a_generic_list_are_left_alone() {
+        for signature in [
+            "function step(count: number): ()",
+            "local compare: (number, number) -> boolean",
+            "local handler: <a>(a) -> a",
+        ] {
+            assert_eq!(strip_unbound_generics(signature), signature);
+        }
+    }
+
+    #[test]
+    fn self_calls_are_found_and_bare_ones_are_not() {
+        let source = "function PlayerUtils:GetPlayerMaid(player)\n\
+                      end\n\
+                      local function run()\n\
+                          return self:GetPlayerMaid(player)\n\
+                      end\n\
+                      local cached = self.GetPlayerMaidCache\n\
+                      local other = GetPlayerMaid(player)\n\
+                      local nested = myself:GetPlayerMaid(player)\n";
+
+        let found = self_receiver_positions(source, "GetPlayerMaid");
+        assert_eq!(found.len(), 1, "found {found:?}");
+        assert_eq!(found[0].line, 3);
+        assert_eq!(
+            &source.lines().nth(3).unwrap()[found[0].character as usize..],
+            "GetPlayerMaid(player)"
+        );
+    }
+
+    /// The scan runs over blanked source, so a call written inside a comment has nothing left to
+    /// match on by the time it gets here.
+    #[test]
+    fn a_commented_out_self_call_is_not_a_reference() {
+        let blanked = crate::roblox::requires::blank_comments(
+            "-- self:GetPlayerMaid(player)\nreturn self:GetPlayerMaid(player)\n",
+        );
+        let found = self_receiver_positions(&blanked, "GetPlayerMaid");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].line, 1);
+    }
+
+    #[test]
+    fn a_body_local_is_pruned_by_default_and_counted() {
+        let mut owner = node("PlayerUtils/FetchUserInfo", 10, 20);
+        let mut local = node("PlayerUtils/FetchUserInfo/cachedInfo", 12, 12);
+        local.kind = 13;
+        owner.children.push(local);
+
+        let content = "";
+        let lines = LineIndex::new(content);
+        let pruned = render(
+            &owner,
+            &lines,
+            RenderOptions {
+                depth: 2,
+                ..RenderOptions::default()
+            },
+        );
+        assert!(pruned.children.is_empty());
+        assert_eq!(pruned.omitted_children, 1);
+
+        let kept = render(
+            &owner,
+            &lines,
+            RenderOptions {
+                depth: 2,
+                include_locals: true,
+                ..RenderOptions::default()
+            },
+        );
+        assert_eq!(kept.children.len(), 1);
+        assert_eq!(kept.children[0].name_path.as_deref(), Some("cachedInfo"));
+        assert_eq!(kept.omitted_children, 0);
+    }
+
+    /// A member of a table was never pruned, so asking for locals must not change what it reports.
+    #[test]
+    fn a_member_is_returned_either_way_and_counts_as_nothing_omitted() {
+        let mut owner = node("Config", 0, 20);
+        let mut member = node("Config/MAX_LEVEL", 1, 1);
+        member.kind = 13;
+        member.member = true;
+        owner.children.push(member);
+
+        let lines = LineIndex::new("");
+        for include_locals in [false, true] {
+            let rendered = render(
+                &owner,
+                &lines,
+                RenderOptions {
+                    depth: 1,
+                    include_locals,
+                    ..RenderOptions::default()
+                },
+            );
+            assert_eq!(rendered.children.len(), 1);
+            assert_eq!(rendered.omitted_children, 0);
+        }
+    }
+
+    /// `depth: 0` means "no children asked for", which is not the same as "children withheld".
+    #[test]
+    fn depth_zero_reports_nothing_omitted() {
+        let mut owner = node("PlayerUtils/Init", 10, 20);
+        let mut local = node("PlayerUtils/Init/playerMaid", 12, 12);
+        local.kind = 13;
+        owner.children.push(local);
+
+        let rendered = render(&owner, &LineIndex::new(""), RenderOptions::default());
+        assert!(rendered.children.is_empty());
+        assert_eq!(rendered.omitted_children, 0);
     }
 
     #[test]

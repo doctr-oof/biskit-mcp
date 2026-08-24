@@ -40,6 +40,18 @@ impl<'a> LineIndex<'a> {
         self.len() == 0
     }
 
+    /// The file the index was built over, for callers that need the text behind a range.
+    pub fn content(&self) -> &'a str {
+        self.content
+    }
+
+    /// The 0-based line and column the byte at `offset` sits on.
+    pub fn position_of(&self, offset: usize) -> (usize, usize) {
+        let line = self.line_of(offset);
+        let column = offset.saturating_sub(self.starts.get(line).copied().unwrap_or(0));
+        (line, column)
+    }
+
     /// The 0-based line the byte at `offset` sits on.
     pub fn line_of(&self, offset: usize) -> usize {
         match self.starts.binary_search(&offset) {

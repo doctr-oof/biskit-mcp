@@ -222,9 +222,14 @@ pub struct SymbolsOverviewRequest {
     /// 1, which is where the members of a table live.
     #[serde(default = "default_overview_depth")]
     pub depth: u32,
-    /// Include each symbol's type signature. Off by default because signatures are long.
+    /// Include each symbol's resolved type signature. Off by default because signatures are long
+    /// and each one costs the language server a request.
     #[serde(default)]
     pub include_detail: bool,
+    /// Include variables declared inside a function body. Off by default, where each symbol
+    /// instead reports how many children were left out as "omitted_children".
+    #[serde(default)]
+    pub include_locals: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -241,9 +246,14 @@ pub struct FindSymbolRequestInput {
     /// Include each matched symbol's source text.
     #[serde(default)]
     pub include_body: bool,
-    /// Include each symbol's type signature. Off by default because signatures are long.
+    /// Include each symbol's resolved type signature. Off by default because signatures are long
+    /// and each one costs the language server a request.
     #[serde(default)]
     pub include_detail: bool,
+    /// Include variables declared inside a function body. Off by default, where each symbol
+    /// instead reports how many children were left out as "omitted_children".
+    #[serde(default)]
+    pub include_locals: bool,
     /// LSP SymbolKind numbers to keep. Empty means all kinds.
     #[serde(default)]
     pub include_kinds: Vec<u32>,
@@ -714,6 +724,7 @@ impl Biskit {
                     &request.relative_path,
                     request.depth,
                     request.include_detail,
+                    request.include_locals,
                 )
                 .await
                 .map_err(fail("get_symbols_overview"))?,
@@ -737,6 +748,7 @@ impl Biskit {
                     depth: request.depth,
                     include_body: request.include_body,
                     include_detail: request.include_detail,
+                    include_locals: request.include_locals,
                     include_kinds: request.include_kinds,
                     exclude_kinds: request.exclude_kinds,
                     substring_matching: request.substring_matching,
