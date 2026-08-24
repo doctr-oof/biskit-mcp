@@ -15,6 +15,9 @@ use biskit_mcp::{lsp, project, prompts, setup, upgrade};
 
 const PROJECT_ENV: &str = "BISKIT_PROJECT";
 
+/// `root_source` for a root that was accepted without any marker vouching for it.
+const CWD_ROOT_SOURCE: &str = "working directory";
+
 #[derive(Parser)]
 #[command(
     name = "biskit-mcp",
@@ -191,7 +194,7 @@ fn resolve_root(request: RootRequest) -> Result<(PathBuf, &'static str)> {
 
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     if !request.discover {
-        return Ok((cwd, "working directory"));
+        return Ok((cwd, CWD_ROOT_SOURCE));
     }
 
     match project::discover_root(&cwd) {
@@ -230,6 +233,7 @@ fn run_server(request: RootRequest) -> Result<()> {
         "serving project {} (root from {root_source})",
         project.root().display()
     );
+    bootstrap_on_startup(&project, root_source);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -244,6 +248,55 @@ fn run_server(request: RootRequest) -> Result<()> {
         outcome?;
         anyhow::Ok(())
     })
+}
+
+/// Lays `.biskit` down at startup so its settings can be edited before the first tool call.
+///
+/// A root that no marker vouched for is left alone: `.biskit` is the highest-priority entry in
+/// [`project::ROOT_MARKERS`], so planting one in a stray working directory would outrank the real
+/// project root for every later discovery. A project Biskit cannot write to still serves every
+/// read-only tool, so a failure here is reported rather than fatal.
+fn bootstrap_on_startup(project: &Project, root_source: &str) {
+    let biskit = project.biskit_dir();
+    if root_source == CWD_ROOT_SOURCE {
+        tracing::debug!(
+            target: "biskit",
+            "root came from the {CWD_ROOT_SOURCE}, so {} was left uncreated",
+            biskit.display()
+        );
+        return;
+    }
+
+    let report = match project.bootstrap() {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(
+                target: "biskit",
+                "could not initialise {}: {error:#}",
+                biskit.display()
+            );
+            return;
+        }
+    };
+
+    let created: Vec<&str> = [
+        (report.created_biskit_dir, project::BISKIT_DIR),
+        (report.created_gitignore, ".gitignore"),
+        (report.created_settings, project::SETTINGS_FILE),
+        (report.created_local_settings, project::LOCAL_SETTINGS_FILE),
+    ]
+    .into_iter()
+    .filter_map(|(created, name)| created.then_some(name))
+    .collect();
+
+    if !created.is_empty() {
+        tracing::info!(
+            target: "biskit",
+            "initialised {} ({})",
+            biskit.display(),
+            created.join(", ")
+        );
+    }
 }
 
 fn run_init(request: RootRequest) -> Result<()> {
