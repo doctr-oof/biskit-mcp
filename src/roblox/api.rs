@@ -127,7 +127,13 @@ pub struct ClassAnswer {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub learn_more_link: Option<String>,
     pub members: Vec<MemberSummary>,
-    pub member_count: usize,
+    /// How many members survived `member_filter`, which is not how many the class has. Named for
+    /// what it counts, because `member_count` read as the class's own total.
+    pub returned_count: usize,
+    /// Every member the class carries before `member_filter` narrowed them. Omitted when nothing
+    /// was filtered out, where it would only repeat `returned_count`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_member_count: Option<usize>,
     #[serde(skip_serializing_if = "crate::json::is_false")]
     pub truncated: bool,
 }
@@ -289,16 +295,17 @@ impl RobloxApi {
             }
         }
 
+        let total_member_count = members.len();
         if let Some(filter) = query.member_filter {
             let needle = filter.to_lowercase();
             members.retain(|member| member.name.to_lowercase().contains(&needle));
         }
 
-        let member_count = members.len();
+        let returned_count = members.len();
         let limit = query
             .max_members
             .min(DEFAULT_MAX_MEMBERS.max(query.max_members));
-        let truncated = member_count > limit;
+        let truncated = returned_count > limit;
         members.truncate(limit);
 
         let documentation = self.lookup_docs(&found.name);
@@ -315,7 +322,9 @@ impl RobloxApi {
                 extends: found.extends.clone(),
                 inherits: ancestry,
                 members,
-                member_count,
+                returned_count,
+                total_member_count: (total_member_count != returned_count)
+                    .then_some(total_member_count),
                 truncated,
             }),
             security_level: self.security_level,
