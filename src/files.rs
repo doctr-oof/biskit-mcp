@@ -56,12 +56,15 @@ pub struct PatternSearchResult {
     /// Counts mode: how many matches each file holds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counts: Option<BTreeMap<String, usize>>,
-    /// Counts mode: the sum over every file reported.
+    /// Snippets and counts modes: the sum over every file reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_matches: Option<usize>,
     /// True when `max_pattern_matches` cut the result set short.
     #[serde(skip_serializing_if = "crate::serde_skip::is_false")]
     pub truncated: bool,
+    /// What the cut left out, on the paths where something was cut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// How much a search reports about what it found.
@@ -287,13 +290,34 @@ impl FileTools {
         }
 
         match request.mode {
-            SearchMode::Snippets => result.matches = Some(snippets),
+            SearchMode::Snippets => {
+                result.matches = Some(snippets);
+                result.total_matches = Some(total);
+            }
             SearchMode::Files => result.files = Some(files),
             SearchMode::Counts => {
                 result.counts = Some(counts);
                 result.total_matches = Some(total);
             }
         }
+
+        result.note = result.truncated.then(|| match request.mode {
+            SearchMode::Snippets => format!(
+                "the first {} matches are reported and the rest were cut, which is the \
+                 tools.max_pattern_matches ceiling. The cut fell inside a file rather than \
+                 between two, so the last file listed is incomplete, and how many matches there \
+                 are in total is not known from this answer. Ask again with mode \"counts\" for \
+                 the total, narrow relative_path, or raise tools.max_pattern_matches in \
+                 .biskit/settings.yml.",
+                request.max_matches
+            ),
+            SearchMode::Files | SearchMode::Counts => format!(
+                "the first {} matching files are reported and the rest were cut, which is the \
+                 tools.max_pattern_matches ceiling. Narrow relative_path, or raise \
+                 tools.max_pattern_matches in .biskit/settings.yml.",
+                request.max_matches
+            ),
+        });
         Ok(result)
     }
 
@@ -555,6 +579,41 @@ mod tests {
             snippets(&found).keys().collect::<Vec<_>>(),
             vec!["src/Own.luau"]
         );
+    }
+
+    #[test]
+    fn a_truncated_search_says_what_it_cut_and_how_many_it_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src").join("Many.luau"),
+            "Marker\n".repeat(10),
+        )
+        .unwrap();
+
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), Settings::default());
+        let mut request = search("Marker");
+        request.max_matches = 3;
+
+        let found = files.search_for_pattern(request).unwrap();
+        assert!(found.truncated);
+        assert_eq!(
+            found.total_matches,
+            Some(3),
+            "snippets mode reports how many it handed back, not nothing"
+        );
+        let note = found.note.expect("a cut answer says it was cut");
+        assert!(note.contains("max_pattern_matches"), "unexpected: {note}");
+        assert!(note.contains("the last file listed is incomplete"));
+    }
+
+    #[test]
+    fn an_untruncated_search_carries_no_note() {
+        let (_dir, files) = open();
+        let found = files.search_for_pattern(search("Marker")).unwrap();
+        assert!(!found.truncated);
+        assert!(found.note.is_none());
+        assert!(found.total_matches.is_some());
     }
 
     #[test]
