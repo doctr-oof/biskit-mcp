@@ -19,12 +19,7 @@ const DISABLED_SOURCEMAP_HINT: &str = "set lsp.sourcemap in .biskit/settings.yml
 
 const SUGGESTED_CHILDREN: usize = 24;
 
-const CHILD_BY_NAME_METHODS: [&str; 4] = [
-    "GetService",
-    "WaitForChild",
-    "FindFirstChild",
-    "FindFirstAncestor",
-];
+const CHILD_BY_NAME_METHODS: [&str; 3] = ["GetService", "WaitForChild", "FindFirstChild"];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -309,7 +304,15 @@ impl Sourcemap {
 
     /// Resolves an instance path written the way Roblox code writes one.
     pub fn resolve_instance_path(&self, instance_path: &str) -> Result<usize> {
-        let segments = parse_instance_path(instance_path);
+        let segments = match parse_instance_path(instance_path) {
+            Ok(segments) => segments,
+            Err(reason) => bail_hint!(
+                "an instance path looks like \"game.ReplicatedStorage.Shared.Combat\". Only \
+                 literal names resolve statically, and only :GetService, :WaitForChild and \
+                 :FindFirstChild descend into a child";
+                "cannot read instance_path {instance_path:?}: {reason}"
+            ),
+        };
         if segments.is_empty() {
             bail_hint!(
                 "an instance path looks like \"game.ReplicatedStorage.Shared.Combat\"";
@@ -364,43 +367,42 @@ fn root_label(name: &str, class_name: &str) -> String {
 }
 
 /// Splits an instance path into names, accepting every spelling Roblox code uses for the same traversal.
-pub fn parse_instance_path(input: &str) -> Vec<String> {
+pub fn parse_instance_path(input: &str) -> Result<Vec<String>, String> {
     let mut segments = Vec::new();
-    let bytes: Vec<char> = input.chars().collect();
+    let chars: Vec<char> = input.chars().collect();
     let mut index = 0;
 
-    while index < bytes.len() {
-        match bytes[index] {
+    while index < chars.len() {
+        match chars[index] {
             '.' | '/' | ' ' | '\t' => index += 1,
             ':' => {
-                let (method, next) = read_identifier(&bytes, index + 1);
-                index = next;
-                let (argument, next) = read_call_string(&bytes, index);
+                let (method, next) = read_identifier(&chars, index + 1);
+                let (argument, next) = read_call_string(&chars, next);
                 index = next;
                 match argument {
                     Some(name) if CHILD_BY_NAME_METHODS.contains(&method.as_str()) => {
                         segments.push(name)
                     }
-                    _ => {}
+                    _ => return Err(format!("cannot resolve :{method}(...) statically")),
                 }
             }
             '[' => {
-                let (argument, next) = read_bracket_string(&bytes, index);
+                let (argument, next) = read_bracket_string(&chars, index);
                 index = next;
-                if let Some(name) = argument {
-                    segments.push(name);
+                match argument {
+                    Some(name) => segments.push(name),
+                    None => return Err("indexed by a value, not a literal name".to_string()),
                 }
             }
-            _ => {
-                let (identifier, next) = read_identifier(&bytes, index);
-                index = if next == index { index + 1 } else { next };
-                if !identifier.is_empty() {
-                    segments.push(identifier);
-                }
+            character if character.is_alphanumeric() || character == '_' => {
+                let (identifier, next) = read_identifier(&chars, index);
+                index = next;
+                segments.push(identifier);
             }
+            character => return Err(format!("{character:?} is not part of an instance path")),
         }
     }
-    segments
+    Ok(segments)
 }
 
 fn read_identifier(chars: &[char], from: usize) -> (String, usize) {
@@ -424,6 +426,7 @@ fn read_call_string(chars: &[char], from: usize) -> (Option<String>, usize) {
 
     let mut depth = 0usize;
     let mut literal: Option<String> = None;
+    let mut only_literal = true;
     while index < chars.len() {
         match chars[index] {
             '(' => {
@@ -434,35 +437,50 @@ fn read_call_string(chars: &[char], from: usize) -> (Option<String>, usize) {
                 depth -= 1;
                 index += 1;
                 if depth == 0 {
-                    return (literal, index);
+                    return (literal.filter(|_| only_literal), index);
                 }
             }
-            quote @ ('"' | '\'') if literal.is_none() => {
+            quote @ ('"' | '\'') => {
                 let (text, next) = read_string(chars, index, quote);
-                literal = Some(text);
+                if literal.is_none() {
+                    literal = Some(text);
+                }
                 index = next;
             }
-            _ => index += 1,
+            character if character.is_whitespace() || character == ',' => index += 1,
+            _ => {
+                if literal.is_none() {
+                    only_literal = false;
+                }
+                index += 1;
+            }
         }
     }
-    (literal, index)
+    (None, index)
 }
 
 fn read_bracket_string(chars: &[char], from: usize) -> (Option<String>, usize) {
     let mut index = from + 1;
     let mut literal = None;
+    let mut only_literal = true;
     while index < chars.len() {
         match chars[index] {
-            ']' => return (literal, index + 1),
-            quote @ ('"' | '\'') if literal.is_none() => {
+            ']' => return (literal.filter(|_| only_literal), index + 1),
+            quote @ ('"' | '\'') => {
                 let (text, next) = read_string(chars, index, quote);
-                literal = Some(text);
+                if literal.is_none() {
+                    literal = Some(text);
+                }
                 index = next;
             }
-            _ => index += 1,
+            character if character.is_whitespace() => index += 1,
+            _ => {
+                only_literal = false;
+                index += 1;
+            }
         }
     }
-    (literal, index)
+    (None, index)
 }
 
 fn read_string(chars: &[char], from: usize, quote: char) -> (String, usize) {
@@ -603,6 +621,39 @@ mod tests {
                 "failed on {spelling}"
             );
         }
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_read_statically_is_refused_rather_than_guessed_at() {
+        let map = fixture();
+        for spelling in [
+            "script:FindFirstAncestor(\"Shared\")",
+            "game.ReplicatedStorage:FindFirstChild(childName)",
+            "game.ReplicatedStorage.Shared[key]",
+            "game.ReplicatedStorage:GetChildren()[1]",
+        ] {
+            let error = map.resolve_instance_path(spelling).unwrap_err();
+            let rendered = crate::errors::render("resolve_instance_path", &error);
+            assert!(
+                rendered.contains("cannot read instance_path"),
+                "{spelling} should not have resolved, got: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_that_descends_into_a_child_still_resolves() {
+        let map = fixture();
+        let expected = map
+            .resolve_instance_path("game.ReplicatedStorage.Shared.Combat")
+            .unwrap();
+        assert_eq!(
+            map.resolve_instance_path(
+                "game:GetService(\"ReplicatedStorage\"):FindFirstChild(\"Shared\").Combat"
+            )
+            .unwrap(),
+            expected
+        );
     }
 
     #[test]
