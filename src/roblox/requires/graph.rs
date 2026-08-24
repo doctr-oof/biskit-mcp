@@ -356,7 +356,7 @@ impl RequireGraph {
             unresolved,
             cycles,
             truncated,
-            sourcemap: sourcemap.reference(),
+            sourcemap: sourcemap.reference(self.stamp().newest()),
         })
     }
 }

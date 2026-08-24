@@ -7,7 +7,7 @@ mod string_require;
 
 use anyhow::Result;
 
-pub use build::{GraphStamp, build_or_reuse};
+pub use build::{GraphStamp, build_or_reuse, newest_luau_source};
 pub use graph::{
     Edge, GraphAnswer, GraphRequest, Module, ReachedModule, RequireGraph, UnresolvedEntry,
     UnresolvedRequire,

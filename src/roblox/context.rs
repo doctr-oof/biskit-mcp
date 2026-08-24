@@ -156,7 +156,7 @@ pub async fn module_context(
         unresolved_requires,
         api,
         diagnostics,
-        sourcemap: sourcemap.reference(),
+        sourcemap: sourcemap.reference(graph.stamp().newest()),
         notes,
     })
 }

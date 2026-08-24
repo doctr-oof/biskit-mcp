@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -11,6 +11,7 @@ use crate::lsp::acquire;
 use crate::lsp::session::LanguageServerHandle;
 use crate::memory::MemoryStore;
 use crate::project::{self, Project};
+use crate::roblox::RobloxIndex;
 
 /// Everything a confused caller needs to tell "no matches" from "nothing is running".
 #[derive(Debug, Clone, Serialize)]
@@ -112,6 +113,7 @@ const SHARED_REQUIRE_OFF_NOTE: &str = "project.shared_require is off, so the req
 
 pub async fn collect(
     handle: &LanguageServerHandle,
+    roblox: &RobloxIndex,
     settings: &Settings,
     memories: &MemoryStore,
     root_source: &str,
@@ -136,7 +138,7 @@ pub async fn collect(
         },
         sourcemap: match memory_only {
             true => None,
-            false => sourcemap_status(handle, settings).await,
+            false => sourcemap_status(handle, roblox, settings).await,
         },
         shared_require: match memory_only {
             true => None,
@@ -234,6 +236,7 @@ fn parsed_version(value: &str) -> Option<(u32, u32, u32)> {
 
 async fn sourcemap_status(
     handle: &LanguageServerHandle,
+    roblox: &RobloxIndex,
     settings: &Settings,
 ) -> Option<SourcemapStatus> {
     let relative = settings.lsp.sourcemap.as_ref()?;
@@ -256,7 +259,7 @@ async fn sourcemap_status(
         });
     };
 
-    let newest = newest_source(handle).await;
+    let newest = roblox.newest_source().await;
     let stale = newest
         .as_ref()
         .map(|(_, written)| *written > modified)
@@ -277,23 +280,6 @@ async fn sourcemap_status(
             .flatten(),
         note: stale.then(|| STALE_SOURCEMAP_NOTE.to_string()),
     })
-}
-
-async fn newest_source(handle: &LanguageServerHandle) -> Option<(PathBuf, SystemTime)> {
-    let files = handle.resolve_luau_files(None).await.ok()?;
-
-    tokio::task::spawn_blocking(move || {
-        files
-            .into_iter()
-            .filter_map(|path| {
-                let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
-                Some((path, modified))
-            })
-            .max_by_key(|(_, modified)| *modified)
-    })
-    .await
-    .ok()
-    .flatten()
 }
 
 fn epoch_seconds(time: SystemTime) -> Option<u64> {

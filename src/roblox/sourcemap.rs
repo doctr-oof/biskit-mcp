@@ -53,6 +53,10 @@ pub struct SourcemapReference {
     pub modified_epoch_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age_seconds: Option<u64>,
+    /// True when a Luau file has been written since the sourcemap was generated, so this answer
+    /// describes a game the project no longer builds. Absent when neither time could be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
     pub instances: usize,
 }
 
@@ -171,7 +175,9 @@ impl Sourcemap {
         Self::index(root, relative_path.to_string(), None)
     }
 
-    pub fn reference(&self) -> SourcemapReference {
+    /// What an answer reports about the sourcemap it came from, judged against the newest Luau
+    /// file the caller knows about.
+    pub fn reference(&self, newest_source: Option<SystemTime>) -> SourcemapReference {
         let modified = self.stamp.map(|(modified, _)| modified);
         SourcemapReference {
             relative_path: self.relative_path.clone(),
@@ -186,6 +192,9 @@ impl Sourcemap {
                     .ok()
                     .map(|elapsed| elapsed.as_secs())
             }),
+            stale: modified
+                .zip(newest_source)
+                .map(|(modified, newest)| newest > modified),
             instances: self.nodes.len(),
         }
     }
@@ -263,6 +272,7 @@ impl Sourcemap {
         &self,
         instance_path: Option<&str>,
         relative_path: Option<&str>,
+        newest_source: Option<SystemTime>,
     ) -> Result<ResolveAnswer> {
         let instances = match (instance_path, relative_path) {
             (Some(_), Some(_)) => bail_hint!(
@@ -292,7 +302,7 @@ impl Sourcemap {
 
         Ok(ResolveAnswer {
             instances,
-            sourcemap: self.reference(),
+            sourcemap: self.reference(newest_source),
         })
     }
 
@@ -547,6 +557,8 @@ pub fn is_init_file(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn fixture() -> Sourcemap {
@@ -734,5 +746,36 @@ mod tests {
             .resolve_instance_path("game.ReplicatedStorage.Shared")
             .unwrap();
         assert_eq!(map.script_file(shared), None);
+    }
+
+    #[test]
+    fn a_source_written_after_the_sourcemap_makes_every_answer_say_so() {
+        let mut map = fixture();
+        let generated = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        map.stamp = Some((generated, 4096));
+
+        let older = map.reference(Some(generated - Duration::from_secs(60)));
+        assert_eq!(older.stale, Some(false));
+
+        let newer = map.reference(Some(generated + Duration::from_secs(60)));
+        assert_eq!(newer.stale, Some(true));
+
+        let answer = map
+            .resolve(
+                Some("game.ReplicatedStorage.Shared.Combat"),
+                None,
+                Some(generated + Duration::from_secs(60)),
+            )
+            .unwrap();
+        assert_eq!(answer.sourcemap.stale, Some(true));
+    }
+
+    #[test]
+    fn a_time_neither_side_can_be_read_leaves_no_verdict_rather_than_a_wrong_one() {
+        let mut map = fixture();
+        assert_eq!(map.reference(Some(SystemTime::now())).stale, None);
+
+        map.stamp = Some((UNIX_EPOCH + Duration::from_secs(1_700_000_000), 4096));
+        assert_eq!(map.reference(None).stale, None);
     }
 }

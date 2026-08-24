@@ -568,12 +568,14 @@ impl Biskit {
             .sourcemap()
             .await
             .map_err(fail("resolve_instance_path"))?;
+        let newest = self.inner.roblox.newest_source().await;
         self.ok(
             "resolve_instance_path",
             &sourcemap
                 .resolve(
                     request.instance_path.as_deref(),
                     request.relative_path.as_deref(),
+                    newest.map(|(_, modified)| modified),
                 )
                 .map_err(fail("resolve_instance_path"))?,
         )
@@ -671,6 +673,7 @@ impl Biskit {
     async fn get_status(&self, Parameters(NoArguments {}): Parameters<NoArguments>) -> ToolResult {
         let status = status::collect(
             &self.inner.language_server,
+            &self.inner.roblox,
             &self.inner.settings,
             &self.inner.memories,
             self.inner.root_source,

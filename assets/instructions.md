@@ -114,6 +114,8 @@ Aim `line`/`column` at type's own name, not at value: in `local config: PlayerCo
 
 `get_signature_help` answers "what arguments does this take" without reading callee. Aim `line`/`column` inside parentheses of call. Empty `signatures` carries `note`; usual cause is position outside parentheses, but luau-lsp also answers with nothing at some positions genuinely inside call, among them receiver of `self:` method call. Note says so rather than asserting one cause.
 
+`label` and `parameters` are language server's own rendering of resolved call, passed through unchanged. Where callee is variadic (`print`, `table.pack`, anything taking `...`), it has no declared parameter names to render, and luau-lsp fills label from arguments at call site instead. Parameter names you get back are then your own, not callee's. `active_parameter` still tracks correctly. When callee is variadic, read its real signature with `explain_symbol` or `query_roblox_api` on callee itself.
+
 `line` past end of file and `column` past end of line are both refused, with the real length in message. Nothing is silently clamped, so a position that answers is a position that was in range.
 
 ## Roblox, not just Luau
@@ -138,11 +140,13 @@ Requires resolved through sourcemap, so `script.Parent.Parent.Shared.X`, `game:G
 
 `resolve_instance_path` goes both ways. Pass `instance_path` for file behind `game.ReplicatedStorage.Shared.Combat`; pass `relative_path` for where `src/Shared/Combat/init.luau` ends up in game. Never guess this translation. File that resolves to nothing is not synced by rojo project, so editing it changes nothing at runtime.
 
-Every DataModel answer carries `sourcemap` with mtime and age. Old sourcemap describes game that no longer exists. Check it before trusting instance path that surprises you.
+Every DataModel answer carries `sourcemap` with mtime, age, and `stale`. `stale: true` means a Luau file is newer than the sourcemap, so the answer describes a game the project no longer builds and a script added or moved since then is invisible. Regenerate the sourcemap before trusting it. Age alone does not answer this: sourcemap generated forty seconds ago is stale if file was written thirty seconds ago, and fresh if nothing changed in hour. `get_status` names the offending file in `sourcemap.newest_source`.
 
 `query_roblox_api` is ground truth for Roblox API, read from same type definitions the checker uses. Do not recall Roblox API from memory — hallucinated method looks exactly like real one until it runs.
 
 Ask it for class (`BasePart`), member (`TweenService:Create`, `BasePart.Anchored`), or enum (`Enum.EasingStyle`). Member answer carries signature, parameter docs, return docs, deprecation plus replacement. Class answer lists own members only; pass `include_inherited: true` to walk ancestry, `member_filter` to narrow. Three counts, each answering different question: `returned_count` is how many members are in answer, `matched_count` how many survived `member_filter` before `max_members` capped list, `total_member_count` how many class carried before filter. Last two omitted when they equal the one above. Capped answer is sorted first: own members before inherited, current before deprecated, so sample is worth reading. Members hidden at current `lsp.roblox_security_level` are absent, and answer names the level it read.
+
+Enum answer lists item names and, where documentation carries one, `learn_more_link`. It does not carry numeric `EnumItem.Value`: neither type definitions nor documentation dump Biskit caches records those numbers. Serialised enum read back as number cannot be named from this tool; follow `learn_more_link` or call `Enum.X:FromValue(n)` at runtime.
 
 ## After you edit code
 

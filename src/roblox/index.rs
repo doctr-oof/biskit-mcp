@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -70,6 +71,23 @@ impl RobloxIndex {
 
         *self.graph.lock().map_err(|_| poisoned("require graph"))? = Some(Arc::clone(&built));
         Ok(built)
+    }
+
+    /// The most recently written Luau file in the project, and when it was written.
+    ///
+    /// This is what decides whether a sourcemap is stale, so it reads the same file set the
+    /// require graph is built from rather than the project walk alone.
+    pub async fn newest_source(&self) -> Option<(PathBuf, SystemTime)> {
+        let sourcemap = self.sourcemap().await.ok();
+        let project = self.project.clone();
+        let settings = self.settings.clone();
+
+        tokio::task::spawn_blocking(move || {
+            requires::newest_luau_source(&project, &settings, sourcemap.as_deref())
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// The cached Roblox type definitions and API documentation.

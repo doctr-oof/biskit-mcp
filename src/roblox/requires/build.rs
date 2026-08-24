@@ -24,6 +24,13 @@ pub struct GraphStamp {
     newest: Option<SystemTime>,
 }
 
+impl GraphStamp {
+    /// When the most recently written Luau file in the graph's file set was last modified.
+    pub fn newest(&self) -> Option<SystemTime> {
+        self.newest
+    }
+}
+
 /// Rebuilds the graph only when the files it was built from have moved.
 pub fn build_or_reuse(
     cached: Option<std::sync::Arc<RequireGraph>>,
@@ -31,7 +38,7 @@ pub fn build_or_reuse(
     settings: &Settings,
     sourcemap: &Sourcemap,
 ) -> Result<std::sync::Arc<RequireGraph>> {
-    let files = luau_files(project, settings, sourcemap)?;
+    let files = luau_files(project, settings, Some(sourcemap))?;
     let stamp = stamp_of(&files, sourcemap);
 
     if let Some(existing) = cached.filter(|graph| graph.stamp() == &stamp) {
@@ -50,7 +57,7 @@ pub fn build_or_reuse(
 fn luau_files(
     project: &Project,
     settings: &Settings,
-    sourcemap: &Sourcemap,
+    sourcemap: Option<&Sourcemap>,
 ) -> Result<Vec<PathBuf>> {
     let mut found = std::collections::BTreeSet::new();
     for entry in project::walk_builder(project.root(), project.root(), &settings.project)?
@@ -69,7 +76,7 @@ fn luau_files(
         }
     }
 
-    for relative in sourcemap.luau_files() {
+    for relative in sourcemap.iter().flat_map(|map| map.luau_files()) {
         let Ok(path) = project.resolve(relative) else {
             continue;
         };
@@ -79,6 +86,25 @@ fn luau_files(
     }
 
     Ok(found.into_iter().collect())
+}
+
+/// The most recently written file the graph would be built from, and when it was written.
+///
+/// Reads metadata only, so it costs a project walk and one stat per file rather than a parse. It
+/// answers the same question `GraphStamp::newest` does, for the callers that hold no graph.
+pub fn newest_luau_source(
+    project: &Project,
+    settings: &Settings,
+    sourcemap: Option<&Sourcemap>,
+) -> Option<(PathBuf, SystemTime)> {
+    luau_files(project, settings, sourcemap)
+        .ok()?
+        .into_iter()
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+            Some((path, modified))
+        })
+        .max_by(|left, right| left.1.cmp(&right.1))
 }
 
 fn stamp_of(files: &[PathBuf], sourcemap: &Sourcemap) -> GraphStamp {
@@ -277,7 +303,7 @@ pub(super) mod tests {
         let project = Project::open(root).unwrap();
         let settings = Settings::default();
         let sourcemap = Sourcemap::load(&project, &settings).unwrap();
-        let files = luau_files(&project, &settings, &sourcemap).unwrap();
+        let files = luau_files(&project, &settings, Some(&sourcemap)).unwrap();
         let stamp = stamp_of(&files, &sourcemap);
         let graph = build(&project, &settings, &sourcemap, files, stamp).unwrap();
         (dir, project, graph)
@@ -424,7 +450,7 @@ pub(super) mod tests {
             ..Default::default()
         };
         let sourcemap = Sourcemap::load(&project, &settings).unwrap();
-        let files = luau_files(&project, &settings, &sourcemap).unwrap();
+        let files = luau_files(&project, &settings, Some(&sourcemap)).unwrap();
         let stamp = stamp_of(&files, &sourcemap);
         let graph = build(&project, &settings, &sourcemap, files, stamp).unwrap();
         (dir, graph)
@@ -572,7 +598,7 @@ pub(super) mod tests {
         };
         let sourcemap = Sourcemap::load(&project, &settings).unwrap();
 
-        let files = luau_files(&project, &settings, &sourcemap).unwrap();
+        let files = luau_files(&project, &settings, Some(&sourcemap)).unwrap();
         assert!(
             files.iter().any(|path| path.ends_with("Signal.luau")),
             "a gitignored file rojo syncs into the game is still part of the game: {files:?}"
@@ -607,7 +633,7 @@ pub(super) mod tests {
         let project = Project::open(root).unwrap();
         let settings = Settings::default();
         let sourcemap = Sourcemap::load(&project, &settings).unwrap();
-        let files = luau_files(&project, &settings, &sourcemap).unwrap();
+        let files = luau_files(&project, &settings, Some(&sourcemap)).unwrap();
         let stamp = stamp_of(&files, &sourcemap);
         let graph = build(&project, &settings, &sourcemap, files, stamp).unwrap();
 
