@@ -113,10 +113,23 @@ impl Project {
             }
         }
 
-        if !resolved.starts_with(&self.root) {
+        if !resolved.starts_with(&self.root) || !self.physically_inside(&resolved) {
             bail_hint!(ESCAPED_ROOT_HINT; "path escapes the project root: {relative}");
         }
         Ok(resolved)
+    }
+
+    /// Whether `resolved` still lands under the root once every symlink and junction on it is followed.
+    ///
+    /// `resolve` is called for paths that do not exist yet, so the check runs against the nearest ancestor that does.
+    fn physically_inside(&self, resolved: &Path) -> bool {
+        for ancestor in resolved.ancestors() {
+            let Ok(canonical) = canonicalize(ancestor) else {
+                continue;
+            };
+            return canonical.starts_with(&self.root);
+        }
+        true
     }
 
     pub fn relativize(&self, absolute: &Path) -> Result<String> {
@@ -288,5 +301,31 @@ mod tests {
         let project = Project::open(dir.path()).unwrap();
         assert!(project.resolve("../outside.luau").is_err());
         assert!(project.resolve("src/../src/init.luau").is_ok());
+    }
+
+    #[test]
+    fn resolve_refuses_a_link_that_points_out_of_the_project_root() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secrets.env");
+        std::fs::write(&secret, "TOKEN=1\n").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("notes.luau");
+
+        #[cfg(windows)]
+        let created = std::os::windows::fs::symlink_file(&secret, &link).is_ok();
+        #[cfg(unix)]
+        let created = std::os::unix::fs::symlink(&secret, &link).is_ok();
+
+        if !created {
+            return;
+        }
+
+        let project = Project::open(dir.path()).unwrap();
+        assert!(
+            project.resolve("notes.luau").is_err(),
+            "a link out of the root must not resolve"
+        );
+        assert!(project.resolve("src/init.luau").is_ok());
     }
 }
