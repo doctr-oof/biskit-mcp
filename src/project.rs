@@ -304,6 +304,32 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_bootstrap_reports_nothing_and_keeps_edited_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::open(dir.path()).unwrap();
+        project.bootstrap().unwrap();
+
+        let edited = "project:\n  memory_only: true\n";
+        std::fs::write(project.settings_path(), edited).unwrap();
+        std::fs::write(project.local_settings_path(), edited).unwrap();
+
+        let report = project.bootstrap().unwrap();
+
+        assert!(!report.created_biskit_dir);
+        assert!(!report.created_gitignore);
+        assert!(!report.created_settings);
+        assert!(!report.created_local_settings);
+        assert_eq!(
+            std::fs::read_to_string(project.settings_path()).unwrap(),
+            edited
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.local_settings_path()).unwrap(),
+            edited
+        );
+    }
+
+    #[test]
     fn resolve_refuses_to_escape_the_project_root() {
         let dir = tempfile::tempdir().unwrap();
         let project = Project::open(dir.path()).unwrap();
