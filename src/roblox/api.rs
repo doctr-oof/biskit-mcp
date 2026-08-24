@@ -153,6 +153,8 @@ pub struct EnumItemAnswer {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learn_more_link: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -402,14 +404,18 @@ impl RobloxApi {
             .filter(|member| {
                 member.kind == MemberKind::Property && member.declaration.ends_with(&item_type)
             })
-            .map(|member| EnumItemAnswer {
-                documentation: self
+            .map(|member| {
+                let documentation = self
                     .docs
-                    .get(&format!("@roblox/enum/{enum_name}.{}", member.name))
-                    .filter(|_| query.include_documentation)
-                    .map(|doc| strip_markup(&doc.documentation))
-                    .filter(|text| !text.is_empty()),
-                name: member.name.clone(),
+                    .get(&format!("@roblox/enum/{enum_name}.{}", member.name));
+                EnumItemAnswer {
+                    documentation: documentation
+                        .filter(|_| query.include_documentation)
+                        .map(|doc| strip_markup(&doc.documentation))
+                        .filter(|text| !text.is_empty()),
+                    learn_more_link: documentation.and_then(|doc| doc.learn_more_link.clone()),
+                    name: member.name.clone(),
+                }
             })
             .collect();
 
@@ -1254,6 +1260,55 @@ end
         assert_eq!(found.name, "Enum.EasingStyle");
         let names: Vec<&str> = found.items.iter().map(|item| item.name.as_str()).collect();
         assert_eq!(names, vec!["Linear", "Sine"]);
+    }
+
+    #[test]
+    fn an_enum_item_carries_its_documentation_link_whether_or_not_docs_were_asked_for() {
+        let (types, services, creatable) = parse_definitions(DEFINITIONS);
+        let api = RobloxApi {
+            types,
+            services,
+            creatable,
+            docs: HashMap::from([(
+                "@roblox/enum/EasingStyle.Linear".to_string(),
+                RawDoc {
+                    documentation: "Moves at a constant speed.".to_string(),
+                    learn_more_link: Some(
+                        "https://create.roblox.com/docs/reference/engine/enums/EasingStyle#Linear"
+                            .to_string(),
+                    ),
+                    params: Vec::new(),
+                    returns: Vec::new(),
+                },
+            )]),
+            security_level: "PluginSecurity",
+        };
+
+        let ApiResult {
+            answer: Answer::Enum(found),
+            ..
+        } = api.answer(query("Enum.EasingStyle")).unwrap()
+        else {
+            panic!("expected an enum answer");
+        };
+
+        let linear = found
+            .items
+            .iter()
+            .find(|item| item.name == "Linear")
+            .expect("Linear is in the fixture");
+        assert!(linear.documentation.is_none(), "docs were not asked for");
+        assert_eq!(
+            linear.learn_more_link.as_deref(),
+            Some("https://create.roblox.com/docs/reference/engine/enums/EasingStyle#Linear")
+        );
+
+        let sine = found
+            .items
+            .iter()
+            .find(|item| item.name == "Sine")
+            .expect("Sine is in the fixture");
+        assert_eq!(sine.learn_more_link, None);
     }
 
     #[test]
