@@ -14,8 +14,6 @@ const MISSING_CACHE_HINT: &str = "run `biskit-mcp doctor` once, or start Biskit 
 
 const SUGGESTIONS: usize = 8;
 
-const DEFAULT_MAX_MEMBERS: usize = 200;
-
 const ENUM_CONTAINER_SUFFIX: &str = "_INTERNAL";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -260,18 +258,30 @@ impl RobloxApi {
             .collect();
 
         if query.include_inherited {
+            let mut shadowed: BTreeSet<&str> = found
+                .members
+                .iter()
+                .map(|member| member.name.as_str())
+                .collect();
             for ancestor in &ancestry {
                 let Some(parent) = self.types.get(ancestor) else {
                     continue;
                 };
-                members.extend(parent.members.iter().map(|member| {
-                    self.summarise(
-                        member,
-                        Some(ancestor.clone()),
-                        query.include_documentation,
-                        ancestor,
-                    )
-                }));
+                members.extend(
+                    parent
+                        .members
+                        .iter()
+                        .filter(|member| !shadowed.contains(member.name.as_str()))
+                        .map(|member| {
+                            self.summarise(
+                                member,
+                                Some(ancestor.clone()),
+                                query.include_documentation,
+                                ancestor,
+                            )
+                        }),
+                );
+                shadowed.extend(parent.members.iter().map(|member| member.name.as_str()));
             }
         }
 
@@ -282,11 +292,8 @@ impl RobloxApi {
         }
 
         let returned_count = members.len();
-        let limit = query
-            .max_members
-            .min(DEFAULT_MAX_MEMBERS.max(query.max_members));
-        let truncated = returned_count > limit;
-        members.truncate(limit);
+        let truncated = returned_count > query.max_members;
+        members.truncate(query.max_members);
 
         let documentation = self.lookup_docs(&found.name);
         ApiResult {
@@ -312,8 +319,12 @@ impl RobloxApi {
     }
 
     fn member_answer(&self, owner: &ApiType, member_name: &str) -> Option<ApiResult> {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut current = Some(owner.name.clone());
         while let Some(name) = current {
+            if !seen.insert(name.clone()) {
+                return None;
+            }
             let holder = self.types.get(&name)?;
             if let Some(member) = holder
                 .members
@@ -890,6 +901,75 @@ end
             .find(|member| member.name == "Destroy")
             .expect("Destroy is inherited from Instance");
         assert_eq!(destroy.inherited_from.as_deref(), Some("Instance"));
+    }
+
+    #[test]
+    fn a_member_a_subclass_redeclares_is_reported_once_from_the_subclass() {
+        const REDECLARED: &str = r#"declare extern type Instance extends Object with
+	Name: string
+	function Destroy(self): nil
+end
+
+declare extern type TweenService extends Instance with
+	Name: string
+end
+"#;
+        let (types, services, creatable) = parse_definitions(REDECLARED);
+        let api = RobloxApi {
+            types,
+            services,
+            creatable,
+            docs: HashMap::new(),
+            security_level: "PluginSecurity",
+        };
+
+        let ApiResult {
+            answer: Answer::Class(class),
+            ..
+        } = api
+            .answer(ApiQuery {
+                include_inherited: true,
+                ..query("TweenService")
+            })
+            .unwrap()
+        else {
+            panic!("expected a class answer");
+        };
+
+        let named: Vec<&MemberSummary> = class
+            .members
+            .iter()
+            .filter(|member| member.name == "Name")
+            .collect();
+        assert_eq!(named.len(), 1, "the inherited copy should be shadowed");
+        assert_eq!(named[0].inherited_from, None);
+        assert_eq!(class.returned_count, class.members.len());
+    }
+
+    #[test]
+    fn a_cyclic_extends_chain_stops_rather_than_spinning() {
+        const CYCLIC: &str = r#"declare extern type Foo extends Bar with
+	Alpha: string
+end
+
+declare extern type Bar extends Foo with
+	Beta: string
+end
+"#;
+        let (types, services, creatable) = parse_definitions(CYCLIC);
+        let api = RobloxApi {
+            types,
+            services,
+            creatable,
+            docs: HashMap::new(),
+            security_level: "PluginSecurity",
+        };
+
+        assert!(api.answer(query("Foo.Beta")).is_ok());
+        assert!(
+            api.answer(query("Foo.Missing")).is_err(),
+            "a member on no type in the cycle has to terminate"
+        );
     }
 
     #[test]
