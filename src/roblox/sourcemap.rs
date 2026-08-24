@@ -215,6 +215,16 @@ impl Sourcemap {
         self.nodes[index].parent
     }
 
+    /// Every Luau file the sourcemap names, whatever the project's ignore set says about it.
+    ///
+    /// A file rojo syncs into the game is part of the game, so the require graph reads this alongside its own walk.
+    pub fn luau_files(&self) -> impl Iterator<Item = &str> {
+        self.by_file
+            .keys()
+            .map(String::as_str)
+            .filter(|path| is_luau_path(path))
+    }
+
     /// The first Luau file an instance was built from, which for a script is its source.
     pub fn script_file(&self, index: usize) -> Option<&str> {
         self.nodes[index]
