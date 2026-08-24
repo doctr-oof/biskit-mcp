@@ -52,6 +52,9 @@ pub fn to_path(uri: &str) -> Result<PathBuf> {
     if looks_like_windows_drive {
         return Ok(PathBuf::from(trimmed.replace('/', "\\")));
     }
+    if !decoded.is_empty() && !decoded.starts_with('/') {
+        return Ok(PathBuf::from(format!(r"\\{}", decoded.replace('/', "\\"))));
+    }
     Ok(PathBuf::from(decoded))
 }
 
@@ -108,13 +111,16 @@ mod tests {
 
     #[test]
     fn unc_paths_keep_their_leading_double_slash() {
-        assert_eq!(
-            from_path(Path::new(r"\\build\share\src\init.luau")).unwrap(),
-            "file://build/share/src/init.luau"
-        );
+        let uri = from_path(Path::new(r"\\build\share\src\init.luau")).unwrap();
+        assert_eq!(uri, "file://build/share/src/init.luau");
         assert_eq!(
             from_path(Path::new("//build/share/src/init.luau")).unwrap(),
             "file://build/share/src/init.luau"
+        );
+        assert_eq!(
+            to_path(&uri).unwrap(),
+            PathBuf::from(r"\\build\share\src\init.luau"),
+            "the share host must survive the round trip"
         );
     }
 
