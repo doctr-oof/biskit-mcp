@@ -35,20 +35,20 @@ use crate::project::Project;
 
 const NAME_PATH_HINT: &str = "a name path is a symbol name such as \"update\", optionally \
                               qualified with its owners as \"PlayerService:update\"; prefix \"/\" \
-                              to anchor it to the top level of the file";
+                              to anchor it to the file's top level";
 
 const POINT_HINT: &str = "name the symbol with name_path, or give the line and column of a use of \
-                          it; line and column are 1-based, as every Biskit result reports them";
+                          it; both are 1-based, as every Biskit result reports them";
 
-const COLUMN_HINT: &str = "columns are 1-based and count UTF-16 code units, as every Biskit result \
-                           reports them; get_inlay_hints reports the columns of interest on a \
-                           line, and omitting column aims at its start";
+const COLUMN_HINT: &str = "columns are 1-based and count UTF-16 code units; get_inlay_hints \
+                           reports a line's columns of interest, and omitting column aims at the \
+                           line's start";
 
 const LINE_HINT: &str = "line numbers are 1-based; get_symbols_overview shows where the file's \
                          symbols start and end";
 
-const LINE_RANGE_HINT: &str = "start_line and end_line are 1-based and inclusive, as every Biskit \
-                               result reports them; omit both to report on the whole file";
+const LINE_RANGE_HINT: &str = "start_line and end_line are 1-based and inclusive; omit both for \
+                               the whole file";
 
 const MAX_DETAIL_HOVERS: usize = 200;
 
@@ -153,8 +153,8 @@ impl<'a> SymbolQuery<'a> {
         match found.len() {
             0 => bail_hint!(
                 format!(
-                    "name paths are case-sensitive; call get_symbols_overview on {relative_path} \
-                     to see what it defines. {NAME_PATH_HINT}"
+                    "name paths are case-sensitive; get_symbols_overview on {relative_path} shows \
+                     what it defines. {NAME_PATH_HINT}"
                 );
                 "no symbol matching {name_path} in {relative_path}"
             ),
@@ -167,8 +167,8 @@ impl<'a> SymbolQuery<'a> {
                 let names: Vec<&str> = found.iter().map(|node| node.name_path.as_str()).collect();
                 bail_hint!(
                     format!(
-                        "name one of them in full, for example \"{}\"; same-named siblings are \
-                         addressed by index, as in \"{name_path}[0]\"",
+                        "name one in full, for example \"{}\"; same-named siblings take an index, \
+                         as in \"{name_path}[0]\"",
                         names[0]
                     );
                     "{name_path} is ambiguous in {relative_path}: {count} matches ({})",

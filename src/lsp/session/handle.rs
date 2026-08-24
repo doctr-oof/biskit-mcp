@@ -93,7 +93,7 @@ impl LanguageServerHandle {
         if self.settings.project.memory_only {
             bail_hint!(
                 "set project.memory_only to false in .biskit/settings.yml and restart the server, \
-                 or use search_for_pattern and find_file instead";
+                 or use search_for_pattern and find_file";
                 "Biskit is in memory-only mode, so the Luau language server is not available"
             );
         }

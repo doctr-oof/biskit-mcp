@@ -10,12 +10,11 @@ use crate::project::{Project, normalize_separators};
 pub const MEMORY_EXTENSION: &str = "md";
 const MEM_REFERENCE_PATTERN: &str = r"mem:([A-Za-z0-9._\-/]*[A-Za-z0-9_\-])";
 
-const UNKNOWN_MEMORY_HINT: &str = "call list_memories to see which memories exist for this project";
-const REGEX_HINT: &str = "the pattern is a Rust regex matched with multi-line and \
-                          dot-matches-newline enabled; escape ( ) [ ] . * + ? | \\ to match them \
-                          literally";
-const REPLACEMENT_HINT: &str = "capture groups are numbered from 1 in the order their opening \
-                                parenthesis appears, and \"$$\" inserts one literal dollar sign";
+const UNKNOWN_MEMORY_HINT: &str = "call list_memories to see which memories exist";
+const REGEX_HINT: &str = "the pattern is a Rust regex with multi-line and dot-matches-newline \
+                          enabled; escape ( ) [ ] . * + ? | \\ to match literally";
+const REPLACEMENT_HINT: &str = "capture groups are numbered from 1 in opening-parenthesis order, \
+                                and \"$$\" inserts a literal dollar sign";
 
 pub struct MemoryStore {
     project: Project,
@@ -171,7 +170,7 @@ impl MemoryStore {
         let target = self.path_for(to)?;
         if target.exists() {
             bail_hint!(
-                "pick a different new_name, or delete the existing memory first";
+                "pick a different new_name, or delete the existing memory";
                 "memory already exists: {}",
                 canonical_name(to)
             );
@@ -277,8 +276,7 @@ impl MemoryStore {
         let resolved = self.project.resolve(&relative)?;
         if !resolved.starts_with(self.project.memories_dir()) {
             bail_hint!(
-                "memory names are relative and nest with \"/\"; they may not contain \"..\" or \
-                 start from a drive or root";
+                "memory names are relative and nest with \"/\"; no \"..\", no drive or root prefix";
                 "memory name escapes the memories directory: {name}"
             );
         }

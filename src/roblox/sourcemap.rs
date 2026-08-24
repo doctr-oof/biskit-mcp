@@ -11,11 +11,10 @@ use crate::project::Project;
 
 const MISSING_SOURCEMAP_HINT: &str = "generate one with `rojo sourcemap --include-non-scripts \
                                       --watch default.project.json --output sourcemap.json`, or \
-                                      point lsp.sourcemap at the file the project already \
-                                      generates";
+                                      point lsp.sourcemap at an existing sourcemap";
 
 const DISABLED_SOURCEMAP_HINT: &str = "set lsp.sourcemap in .biskit/settings.yml to this \
-                                       project's sourcemap file and restart the server";
+                                       project's sourcemap and restart the server";
 
 const SUGGESTED_CHILDREN: usize = 24;
 
@@ -276,8 +275,8 @@ impl Sourcemap {
     ) -> Result<ResolveAnswer> {
         let instances = match (instance_path, relative_path) {
             (Some(_), Some(_)) => bail_hint!(
-                "instance_path translates a DataModel path to files, relative_path translates a \
-                 file to its DataModel path";
+                "pass one: instance_path for DataModel to files, relative_path for file to \
+                 DataModel";
                 "pass either instance_path or relative_path, not both"
             ),
             (Some(path), None) => vec![self.describe(self.resolve_instance_path(path)?)],
@@ -285,16 +284,16 @@ impl Sourcemap {
                 let found = self.nodes_for_file(relative);
                 if found.is_empty() {
                     bail_hint!(
-                        "the sourcemap only names files the rojo project actually syncs; a file \
-                         outside the project tree is not in the game at all, and a file added \
-                         since the sourcemap was written needs it regenerated";
+                        "the sourcemap only names files the rojo project syncs; a file outside \
+                         the project tree is not in the game, and a file added since the \
+                         sourcemap was written needs it regenerated";
                         "no instance in the sourcemap is built from {relative}"
                     );
                 }
                 found.into_iter().map(|node| self.describe(node)).collect()
             }
             (None, None) => bail_hint!(
-                "pass instance_path to go from the DataModel to files, or relative_path to go the \
+                "pass instance_path to go from the DataModel to files, or relative_path for the \
                  other way";
                 "neither instance_path nor relative_path was given"
             ),
@@ -366,7 +365,7 @@ impl Sourcemap {
                     };
                     bail_hint!(
                         format!(
-                            "{listing}. Paths are case-sensitive, and an instance added since the \
+                            "{listing}. Paths are case-sensitive; an instance added since the \
                              sourcemap was written is not in it."
                         );
                         "no instance named {segment} under {}",

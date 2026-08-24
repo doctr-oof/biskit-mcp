@@ -22,10 +22,9 @@ use crate::lsp::uri;
 const DECLARATION_CONTEXT_LINES: usize = 1;
 
 const TYPE_DEFINITION_HINT: &str = "aim line and column at the type's own name: in \
-                                    `local config: PlayerConfig`, at `PlayerConfig` rather than \
-                                    at `config`. A value with no written annotation has no type \
-                                    declaration to find, and explain_symbol reports what it \
-                                    resolved to instead.";
+                                    `local config: PlayerConfig`, at `PlayerConfig` not `config`. \
+                                    A value with no written annotation has no type declaration to \
+                                    find; explain_symbol reports what it resolved to.";
 
 const SELF_REFERENCE_NOTE: &str = "references marked resolved_by \"text\" were found by scanning \
                                    the declaring file for `self:` and `self.` uses. luau-lsp types \

@@ -15,9 +15,9 @@ pub const LOCAL_SETTINGS_FILE: &str = "settings.local.yml";
 const GITIGNORE_CONTENTS: &str = "settings.local.yml\n";
 
 const RELATIVE_PATH_HINT: &str = "pass a path relative to the project root, such as \
-                                  \"src/init.luau\", or \".\" for the root itself";
-const ESCAPED_ROOT_HINT: &str = "Biskit only reads inside the project root; drop the leading \
-                                 \"..\" segments";
+                                  \"src/init.luau\", or \".\" for the root";
+const ESCAPED_ROOT_HINT: &str = "drop the leading \"..\" segments; Biskit only reads inside the \
+                                 project root";
 
 const FALLBACK_MARKERS: [&str; 2] = [".git", "default.project.json"];
 
@@ -180,7 +180,7 @@ fn build_overrides(root: &Path, patterns: &[String]) -> Result<Override> {
         overrides.add(&format!("!{negated}")).map_err(|error| {
             crate::errors::hinted(
                 format!("invalid project.ignored_paths entry {pattern:?}: {error}"),
-                "entries use gitignore syntax, one pattern per entry, for example \"Packages/\" \
+                "entries use gitignore syntax, one pattern each, for example \"Packages/\" \
                  or \"**/node_modules\"",
             )
         })?;

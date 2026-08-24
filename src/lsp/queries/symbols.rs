@@ -25,9 +25,9 @@ const DETAIL_CAPPED_NOTE: &str = "detail was filled for the first symbols only: 
                                   depth, or ask explain_symbol about the symbols still missing a \
                                   detail.";
 
-const DECLARATION_HINT: &str = "aim line and column at the symbol's own name at a use of it; a \
-                                name_path only resolves against symbols the named file itself \
-                                declares, so it cannot start from a call site";
+const DECLARATION_HINT: &str = "aim line and column at the symbol's own name at a use of it; \
+                                name_path only resolves against symbols the named file declares, \
+                                so it cannot start from a call site";
 
 /// The highest `SymbolKind` the LSP specification defines.
 const MAX_SYMBOL_KIND: u32 = 26;

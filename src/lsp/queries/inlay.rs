@@ -87,8 +87,8 @@ impl<'a> SymbolQuery<'a> {
         let hints = match session.inlay_hints(&path, range).await {
             Ok(hints) => hints,
             Err(error) if client::is_unsupported(&error) => bail_hint!(
-                "find_symbol with include_detail reports declared signatures, and explain_symbol \
-                 reports the resolved type of one symbol";
+                "find_symbol with include_detail reports declared signatures; explain_symbol \
+                 reports one symbol's resolved type";
                 "this luau-lsp build does not implement textDocument/inlayHint"
             ),
             Err(error) => return Err(error),

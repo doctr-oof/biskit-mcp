@@ -9,8 +9,8 @@ use crate::config::LspSettings;
 use crate::lsp::acquire;
 
 const MISSING_CACHE_HINT: &str = "run `biskit-mcp doctor` once, or start Biskit outside \
-                                  memory-only mode, so the Roblox type definitions and API \
-                                  documentation are downloaded into the language server cache";
+                                  memory-only mode, to download the Roblox type definitions and \
+                                  API docs into the language server cache";
 
 const SUGGESTIONS: usize = 8;
 

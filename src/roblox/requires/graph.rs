@@ -281,8 +281,8 @@ impl RequireGraph {
                     let index = self.find(relative).ok_or_else(|| {
                         crate::errors::hinted(
                             format!("no Luau file at {relative}"),
-                            "pass a path to a .luau or .lua file relative to the project root, or \
-                             omit relative_path for a project-wide answer",
+                            "pass a project-relative .luau or .lua path, or omit relative_path \
+                             for a project-wide answer",
                         )
                     })?;
                     let module = self.module(index);

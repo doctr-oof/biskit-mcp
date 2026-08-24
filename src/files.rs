@@ -14,12 +14,11 @@ use crate::lines::LineIndex;
 use crate::project::Project;
 
 const LUAU_EXTENSIONS: [&str; 3] = ["luau", "lua", "luaurc"];
-const MISSING_DIRECTORY_HINT: &str = "paths are relative to the project root; run list_dir on \".\" \
-                                      or on the parent to see what is there";
-const REGEX_HINT: &str = "substring_pattern is a Rust regex matched with multi-line enabled, so \
-                          ^ and $ bind to line ends and \".\" stops at them unless \
-                          dot_matches_newline is set; escape ( ) [ ] . * + ? | \\ to match them \
-                          literally";
+const MISSING_DIRECTORY_HINT: &str = "paths are relative to the project root; list_dir \".\" or \
+                                      the parent to see what is there";
+const REGEX_HINT: &str = "substring_pattern is a Rust regex with multi-line enabled, so ^ and $ \
+                          bind to line ends and \".\" stops at them unless dot_matches_newline is \
+                          set; escape ( ) [ ] . * + ? | \\ to match literally";
 
 pub struct FileTools {
     project: Project,
@@ -360,8 +359,7 @@ fn ensure_directory(base: &Path, relative_path: &str) -> Result<()> {
     }
     if base.exists() {
         bail_hint!(
-            "this path is a file; pass its parent directory, or use search_for_pattern to look \
-             inside the file itself";
+            "pass its parent directory, or use search_for_pattern to look inside the file";
             "not a directory: {relative_path}"
         );
     }
