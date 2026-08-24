@@ -1740,10 +1740,7 @@ fn group_diagnostics(
 
 pub fn severity_from_input(value: Option<u32>) -> Result<Severity> {
     match value.unwrap_or(2) {
-        1 => Ok(Severity::Error),
-        2 => Ok(Severity::Warning),
-        3 => Ok(Severity::Information),
-        4 => Ok(Severity::Hint),
+        code @ 1..=4 => Ok(Severity::from_code(Some(code))),
         other => Err(crate::errors::hinted(
             format!(
                 "min_severity must be 1 (error), 2 (warning), 3 (information), or 4 (hint), got \
