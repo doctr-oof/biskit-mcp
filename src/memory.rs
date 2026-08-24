@@ -8,7 +8,7 @@ use crate::errors::hinted;
 use crate::project::{Project, normalize_separators};
 
 pub const MEMORY_EXTENSION: &str = "md";
-const MEM_REFERENCE_PATTERN: &str = r"mem:([A-Za-z0-9._\-/]+)";
+const MEM_REFERENCE_PATTERN: &str = r"mem:([A-Za-z0-9._\-/]*[A-Za-z0-9_\-])";
 
 const UNKNOWN_MEMORY_HINT: &str = "call list_memories to see which memories exist for this project";
 const REGEX_HINT: &str = "the pattern is a Rust regex matched with multi-line and \
@@ -19,6 +19,13 @@ const REPLACEMENT_HINT: &str = "capture groups are numbered from 1 in the order 
 
 pub struct MemoryStore {
     project: Project,
+}
+
+struct PlannedRewrite {
+    path: PathBuf,
+    original: String,
+    rewritten: String,
+    update: ReferenceUpdate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,7 +182,13 @@ impl MemoryStore {
         std::fs::rename(&source, &target)?;
         self.prune_empty_dirs(&source);
 
-        let updated_references = self.rewrite_references(&stem(from), &stem(to))?;
+        let updated_references = match self.rewrite_references(&stem(from), &stem(to)) {
+            Ok(updates) => updates,
+            Err(error) => {
+                restore_moved_file(&target, &source);
+                return Err(error);
+            }
+        };
         Ok(RenameOutcome {
             from: canonical_name(from),
             to: canonical_name(to),
@@ -184,12 +197,41 @@ impl MemoryStore {
     }
 
     fn rewrite_references(&self, from_stem: &str, to_stem: &str) -> Result<Vec<ReferenceUpdate>> {
+        let planned = self.plan_reference_rewrites(from_stem, to_stem)?;
+
+        for index in 0..planned.len() {
+            let plan = &planned[index];
+            let Err(error) = std::fs::write(&plan.path, &plan.rewritten) else {
+                continue;
+            };
+            for done in &planned[..index] {
+                let _ = std::fs::write(&done.path, &done.original);
+            }
+            return Err(anyhow::Error::new(error).context(format!(
+                "failed to rewrite mem: references in {}",
+                plan.path.display()
+            )));
+        }
+
+        let mut updates: Vec<ReferenceUpdate> =
+            planned.into_iter().map(|plan| plan.update).collect();
+        updates.sort_by(|a, b| a.memory.cmp(&b.memory));
+        Ok(updates)
+    }
+
+    /// Reads every memory and works out the rewrite, so a read failure surfaces before anything is written.
+    fn plan_reference_rewrites(
+        &self,
+        from_stem: &str,
+        to_stem: &str,
+    ) -> Result<Vec<PlannedRewrite>> {
         let regex = Regex::new(MEM_REFERENCE_PATTERN)?;
-        let mut updates = Vec::new();
+        let mut planned = Vec::new();
 
         for name in self.list()? {
             let path = self.path_for(&name)?;
-            let original = std::fs::read_to_string(&path)?;
+            let original = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
             let mut occurrences = 0usize;
             let rewritten = regex.replace_all(&original, |captures: &regex::Captures<'_>| {
                 let target = &captures[1];
@@ -202,16 +244,19 @@ impl MemoryStore {
             });
 
             if occurrences > 0 {
-                std::fs::write(&path, rewritten.as_ref())?;
-                updates.push(ReferenceUpdate {
-                    memory: name,
-                    occurrences,
+                planned.push(PlannedRewrite {
+                    rewritten: rewritten.into_owned(),
+                    original,
+                    path,
+                    update: ReferenceUpdate {
+                        memory: name,
+                        occurrences,
+                    },
                 });
             }
         }
 
-        updates.sort_by(|a, b| a.memory.cmp(&b.memory));
-        Ok(updates)
+        Ok(planned)
     }
 
     fn path_for(&self, name: &str) -> Result<PathBuf> {
@@ -261,6 +306,14 @@ impl MemoryStore {
             cursor = directory.parent().map(Path::to_path_buf);
         }
     }
+}
+
+/// Puts a renamed memory back where it came from, so a failed reference rewrite leaves no dangling pointers.
+fn restore_moved_file(target: &Path, source: &Path) {
+    if let Some(parent) = source.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::rename(target, source);
 }
 
 fn reference_matches(reference: &str, from_stem: &str) -> bool {
@@ -412,6 +465,26 @@ mod tests {
         assert_eq!(
             store.read("index").unwrap(),
             "See mem:domain/new-name and mem:domain/new-name plus mem:other"
+        );
+    }
+
+    #[test]
+    fn a_reference_keeps_the_punctuation_that_follows_it() {
+        let (_guard, store) = store();
+        store.create("old-name", "# Old", false).unwrap();
+        store
+            .create(
+                "index",
+                "See mem:old-name. Or mem:old-name/ or (mem:old-name), then mem:old-name.md.",
+                false,
+            )
+            .unwrap();
+
+        let outcome = store.rename("old-name", "new-name").unwrap();
+        assert_eq!(outcome.updated_references[0].occurrences, 4);
+        assert_eq!(
+            store.read("index").unwrap(),
+            "See mem:new-name. Or mem:new-name/ or (mem:new-name), then mem:new-name."
         );
     }
 
