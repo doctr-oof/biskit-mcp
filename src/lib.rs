@@ -1,7 +1,7 @@
 pub mod config;
-pub mod errors;
+pub(crate) mod errors;
 pub mod files;
-pub mod json;
+pub(crate) mod json;
 pub mod lines;
 pub mod lsp;
 pub mod memory;
@@ -10,5 +10,7 @@ pub mod prompts;
 pub mod roblox;
 pub mod server;
 pub mod setup;
-pub mod status;
+pub(crate) mod status;
 pub mod upgrade;
+
+pub(crate) use errors::bail_hint;

@@ -52,10 +52,12 @@ impl SharedIndex {
     }
 
     /// How many files carry a stem the index can be asked about.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.values().map(Vec::len).sum()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

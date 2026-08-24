@@ -1,6 +1,6 @@
 pub mod acquire;
 pub mod cache;
-pub mod client;
+pub(crate) mod client;
 pub mod name_path;
 pub mod protocol;
 pub mod queries;

@@ -28,12 +28,13 @@ pub fn hinted(message: impl Into<String>, hint: impl Into<String>) -> anyhow::Er
     })
 }
 
-#[macro_export]
 macro_rules! bail_hint {
     ($hint:expr; $($message:tt)*) => {
         return ::core::result::Result::Err($crate::errors::hinted(format!($($message)*), $hint))
     };
 }
+
+pub(crate) use bail_hint;
 
 /// Renders a tool failure as prose the caller can act on.
 pub fn render(tool: &str, error: &anyhow::Error) -> String {
