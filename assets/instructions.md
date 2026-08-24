@@ -68,7 +68,7 @@ When file has two symbols of same name, `get_symbols_overview` labels them `User
 
 `find_symbol` returns `{ symbols, truncated }`. `truncated: true` means `max_matches` cut result short: narrow with `relative_path` or raise cap. Field omitted entirely when nothing was cut, so absent = complete. Same for `list_dir` and `search_for_pattern`.
 
-`symbols` is keyed by file path, and each symbol under it carries no path of its own — path comes from key it sits under. `find_declaration` returns same file-keyed shape. `get_symbols_overview` returns bare list, since you supplied file yourself.
+`symbols` is keyed by file path, and each symbol under it carries no path of its own — path comes from key it sits under. `find_declaration` returns same file-keyed shape. `get_symbols_overview` returns `{ symbols, note }`; its `symbols` is bare list, since you supplied file yourself.
 
 `list_dir` returns `{ base, directories, files }`. `base` is directory you listed; every entry named relative to it. Join with `/` to get project-relative path: `base: "src/Services"` plus entry `PlayerService.luau` is `src/Services/PlayerService.luau`. `find_file` and `search_for_pattern` still answer with full project-relative paths.
 
@@ -76,17 +76,23 @@ Top-level symbol in result carries full name path. Nested symbol under `children
 
 Table members sit under owner in `children`, so `depth` controls how much of table you see. `get_symbols_overview` defaults to `depth: 1`, which is owners plus their members; raise it for tables inside tables. `find_symbol` defaults to `depth: 0` — match alone, no members. Member nests only when owner itself declared in same file; member of table declared elsewhere stays top-level.
 
-`find_referencing_symbols` returns `{ references, truncated }`, `references` keyed by file same way. Cap is `tools.max_reference_matches`, default 200; `truncated: true` means hit it, so symbol has more call sites than you see.
+Variable declared inside function body is not member of anything, so traversal prunes it as noise and reports count in `omitted_children`. Symbol with `omitted_children: 2` declares two locals you cannot see, not none. Pass `include_locals: true` to `get_symbols_overview` or `find_symbol` to get them, which is what makes `depth` map body of function rather than only its members. Local is still addressable by name without flag: `find_symbol` on `cachedInfo` finds it wherever it sits.
+
+`find_referencing_symbols` returns `{ references, truncated, note }`, `references` keyed by file same way. Cap is `tools.max_reference_matches`, default 200; `truncated: true` means hit it, so symbol has more call sites than you see.
+
+Reference carrying `resolved_by: "text"` was found by scanning declaring file, not by language server. luau-lsp types implicit `self` of colon-declared method as fresh generic instead of owner, so `self:Method()` resolves to nothing and never reaches reference list; private helper called only that way would otherwise report zero references and read as dead code. Text-found reference is matched on symbol name alone, so confirm receiver before treating one as call site. `note` appears only when answer carries one.
 
 `find_referencing_symbols` snippet is reference line alone by default. Pass `context_lines: 1` or more when you need surrounding lines to judge how symbol used. Each extra line multiplies across every reference, so raise only when line itself not enough.
 
-Type signatures omitted by default. Pass `include_detail: true` to `get_symbols_overview`, `find_symbol`, or `find_declaration` when you actually need signature, not just where symbol lives.
+Type signatures omitted by default. Pass `include_detail: true` to `get_symbols_overview`, `find_symbol`, or `find_declaration` when you actually need signature, not just where symbol lives. `detail` is resolved signature, same source `explain_symbol` reads, so two tools agree about one symbol. Each one costs language server a request; wide answer that runs out of budget says so in `note`, and symbols past ceiling carry no `detail` at all.
 
 Every tool result has size ceiling, `tools.max_answer_chars`. Structured result over ceiling refused outright with message naming what to narrow — half a JSON document unreadable. Text result, such as memory, cut instead and says how much withheld.
 
 ## Types, not just locations
 
-`find_symbol` `detail` is declared shape. `explain_symbol` is what type checker actually inferred. Different answers whenever type not written out: `local part = workspace:FindFirstChild("Thing")` declares nothing, resolves to `Instance?`. Ask `explain_symbol` before you assume a type.
+`find_symbol` `detail` and `explain_symbol` `signature` both report what type checker inferred, so they agree. Reach for `explain_symbol` when you have one symbol and want documentation with it, or when you can only point at line and column; reach for `include_detail` when you are already listing symbols and want their types in same answer. Either way, ask before you assume type: `local part = workspace:FindFirstChild("Thing")` declares nothing and resolves to `Instance?`.
+
+Generic that luau-lsp inferred but signature never uses is stripped from both, because implicit `self` of colon-declared method picks one up (`GetPlayerMaid<a>`) that source never wrote. Generic signature does use is kept.
 
 Point at symbol two ways: `name_path` plus `relative_path`, or `line` plus `column`. Both 1-based, same numbers every Biskit result gives back. Use `line`/`column` for expression that is not symbol — call site, table field, diagnostic location. Pass one or other, never both.
 
@@ -120,7 +126,7 @@ Every DataModel answer carries `sourcemap` with mtime and age. Old sourcemap des
 
 `query_roblox_api` is ground truth for Roblox API, read from same type definitions the checker uses. Do not recall Roblox API from memory — hallucinated method looks exactly like real one until it runs.
 
-Ask it for class (`BasePart`), member (`TweenService:Create`, `BasePart.Anchored`), or enum (`Enum.EasingStyle`). Member answer carries signature, parameter docs, return docs, deprecation plus replacement. Class answer lists own members only; pass `include_inherited: true` to walk ancestry, `member_filter` to narrow. Members hidden at current `lsp.roblox_security_level` are absent, and answer names the level it read.
+Ask it for class (`BasePart`), member (`TweenService:Create`, `BasePart.Anchored`), or enum (`Enum.EasingStyle`). Member answer carries signature, parameter docs, return docs, deprecation plus replacement. Class answer lists own members only; pass `include_inherited: true` to walk ancestry, `member_filter` to narrow. `returned_count` is how many members survived filter, `total_member_count` how many class carried before it — second one omitted when nothing filtered out. Members hidden at current `lsp.roblox_security_level` are absent, and answer names the level it read.
 
 ## After you edit code
 
