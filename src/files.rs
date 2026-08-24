@@ -306,7 +306,7 @@ impl FileTools {
     }
 
     fn walk_builder(&self, base: &Path) -> Result<WalkBuilder> {
-        crate::project::walk_builder(base, &self.settings.project)
+        crate::project::walk_builder(self.project.root(), base, &self.settings.project)
     }
 }
 
@@ -516,6 +516,41 @@ mod tests {
         );
 
         let found = files.search_for_pattern(search("Marker")).unwrap();
+        assert_eq!(
+            snippets(&found).keys().collect::<Vec<_>>(),
+            vec!["src/Own.luau"]
+        );
+    }
+
+    #[test]
+    fn an_ignored_path_stays_ignored_when_a_walk_starts_below_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("src").join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(vendor.join("Vendored.luau"), "local Marker = 1\n").unwrap();
+        std::fs::write(
+            dir.path().join("src").join("Own.luau"),
+            "local Marker = 1\n",
+        )
+        .unwrap();
+
+        let mut settings = Settings::default();
+        settings.project.ignored_paths = vec!["src/vendor/".to_string()];
+        let files = FileTools::new(Project::open(dir.path()).unwrap(), settings);
+
+        assert_eq!(
+            files.find_file("*.luau", "src").unwrap(),
+            vec!["src/Own.luau".to_string()],
+            "the pattern is written against the project root, so naming src must not disarm it"
+        );
+        assert_eq!(
+            files.list_dir("src", true).unwrap().files,
+            vec!["Own.luau".to_string()]
+        );
+
+        let mut request = search("Marker");
+        request.relative_path = "src";
+        let found = files.search_for_pattern(request).unwrap();
         assert_eq!(
             snippets(&found).keys().collect::<Vec<_>>(),
             vec!["src/Own.luau"]

@@ -141,7 +141,15 @@ impl Project {
 }
 
 /// The one walker every project traversal is built from.
-pub fn walk_builder(base: &Path, settings: &crate::config::ProjectSettings) -> Result<WalkBuilder> {
+///
+/// `project.ignored_paths` patterns are written relative to the project root, so `root` is what
+/// they are matched against however deep inside it `base` starts. Rooting them at `base` instead
+/// silently disarms every pattern once a caller names a subdirectory.
+pub fn walk_builder(
+    root: &Path,
+    base: &Path,
+    settings: &crate::config::ProjectSettings,
+) -> Result<WalkBuilder> {
     let mut builder = WalkBuilder::new(base);
     builder
         .hidden(false)
@@ -152,7 +160,7 @@ pub fn walk_builder(base: &Path, settings: &crate::config::ProjectSettings) -> R
         .follow_links(false);
 
     if !settings.ignored_paths.is_empty() {
-        builder.overrides(build_overrides(base, &settings.ignored_paths)?);
+        builder.overrides(build_overrides(root, &settings.ignored_paths)?);
     }
 
     builder.filter_entry(|entry| {
@@ -162,8 +170,8 @@ pub fn walk_builder(base: &Path, settings: &crate::config::ProjectSettings) -> R
     Ok(builder)
 }
 
-fn build_overrides(base: &Path, patterns: &[String]) -> Result<Override> {
-    let mut overrides = OverrideBuilder::new(base);
+fn build_overrides(root: &Path, patterns: &[String]) -> Result<Override> {
+    let mut overrides = OverrideBuilder::new(root);
     for pattern in patterns {
         let negated = match pattern.strip_prefix('!') {
             Some(rest) => rest,
