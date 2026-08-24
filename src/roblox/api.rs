@@ -113,8 +113,11 @@ pub struct ClassAnswer {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub learn_more_link: Option<String>,
     pub members: Vec<MemberSummary>,
-    /// How many members survived `member_filter`, which is not how many the class has.
+    /// How many members are in `members`, and nothing else.
     pub returned_count: usize,
+    /// How many survived `member_filter` before `max_members` capped the list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_count: Option<usize>,
     /// Every member the class carries before `member_filter` narrowed them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_member_count: Option<usize>,
@@ -156,7 +159,11 @@ pub struct EnumItemAnswer {
 pub struct EnumAnswer {
     pub name: String,
     pub items: Vec<EnumItemAnswer>,
+    /// How many items are in `items`, and nothing else.
     pub item_count: usize,
+    /// How many the enum carries before `max_members` capped the list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_count: Option<usize>,
     #[serde(skip_serializing_if = "crate::serde_skip::is_false")]
     pub truncated: bool,
 }
@@ -291,9 +298,13 @@ impl RobloxApi {
             members.retain(|member| member.name.to_lowercase().contains(&needle));
         }
 
-        let returned_count = members.len();
-        let truncated = returned_count > query.max_members;
+        let matched_count = members.len();
+        let truncated = matched_count > query.max_members;
+        if truncated {
+            rank_for_truncation(&mut members);
+        }
         members.truncate(query.max_members);
+        let returned_count = members.len();
 
         let documentation = self.lookup_docs(&found.name);
         ApiResult {
@@ -310,7 +321,8 @@ impl RobloxApi {
                 inherits: ancestry,
                 members,
                 returned_count,
-                total_member_count: (total_member_count != returned_count)
+                matched_count: (matched_count != returned_count).then_some(matched_count),
+                total_member_count: (total_member_count != matched_count)
                     .then_some(total_member_count),
                 truncated,
             }),
@@ -409,15 +421,17 @@ impl RobloxApi {
             items.retain(|entry| entry.name.to_lowercase().contains(&needle));
         }
 
-        let item_count = items.len();
-        let truncated = item_count > query.max_members;
+        let matched_count = items.len();
+        let truncated = matched_count > query.max_members;
         items.truncate(query.max_members);
+        let item_count = items.len();
 
         Ok(ApiResult {
             answer: Answer::Enum(EnumAnswer {
                 name: format!("Enum.{enum_name}"),
                 items,
                 item_count,
+                matched_count: (matched_count != item_count).then_some(matched_count),
                 truncated,
             }),
             security_level: self.security_level,
@@ -543,6 +557,16 @@ fn read_docs(path: &PathBuf) -> HashMap<String, RawDoc> {
         tracing::warn!(target: "biskit", "could not parse {}: {error}", path.display());
         HashMap::new()
     })
+}
+
+/// Orders a member list so the few a cap leaves behind are the few worth reading.
+///
+/// A caller passing `max_members` is sampling, and declaration order puts inherited legacy aliases
+/// in front of the class's own properties. Own members come first, then anything Roblox has not
+/// deprecated. The sort is stable, so declaration order survives inside each group, and it runs
+/// only when the cap is about to drop members.
+fn rank_for_truncation(members: &mut [MemberSummary]) {
+    members.sort_by_key(|member| (member.inherited_from.is_some(), member.deprecated));
 }
 
 fn split_member(asked: &str) -> Option<(&str, &str)> {
@@ -810,6 +834,98 @@ end
         assert!(kinds.contains(&("Name", MemberKind::Property)));
         assert!(kinds.contains(&("Destroy", MemberKind::Method)));
         assert_eq!(class.extends.as_deref(), Some("Object"));
+    }
+
+    #[test]
+    fn a_capped_member_list_counts_what_it_handed_back() {
+        let api = api();
+        let mut asked = query("Instance");
+        asked.max_members = 2;
+
+        let ApiResult {
+            answer: Answer::Class(class),
+            ..
+        } = api.answer(asked).unwrap()
+        else {
+            panic!("expected a class answer");
+        };
+
+        assert_eq!(class.members.len(), 2);
+        assert_eq!(
+            class.returned_count, 2,
+            "returned_count is how many came back, not how many were cut from"
+        );
+        assert_eq!(class.matched_count, Some(4));
+        assert!(class.truncated);
+        assert_eq!(class.total_member_count, None, "no filter narrowed them");
+    }
+
+    #[test]
+    fn a_capped_member_list_samples_the_members_worth_reading() {
+        let api = api();
+        let mut asked = query("TweenService");
+        asked.include_inherited = true;
+        asked.max_members = 2;
+
+        let ApiResult {
+            answer: Answer::Class(class),
+            ..
+        } = api.answer(asked).unwrap()
+        else {
+            panic!("expected a class answer");
+        };
+
+        let names: Vec<&str> = class
+            .members
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect();
+        assert_eq!(
+            names[0], "Create",
+            "the class's own member comes before anything inherited"
+        );
+        assert!(
+            !names.contains(&"clone"),
+            "a deprecated inherited alias is the last thing a sample should spend a slot on: \
+             {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_filter_and_a_cap_report_three_separate_counts() {
+        let api = api();
+        let mut asked = query("Instance");
+        asked.member_filter = Some("n");
+        asked.max_members = 1;
+
+        let ApiResult {
+            answer: Answer::Class(class),
+            ..
+        } = api.answer(asked).unwrap()
+        else {
+            panic!("expected a class answer");
+        };
+
+        assert_eq!(class.returned_count, 1);
+        assert_eq!(class.matched_count, Some(2), "clone and Name spell an n");
+        assert_eq!(class.total_member_count, Some(4));
+    }
+
+    #[test]
+    fn an_uncapped_answer_reports_one_count_and_no_others() {
+        let api = api();
+        let ApiResult {
+            answer: Answer::Class(class),
+            ..
+        } = api.answer(query("Instance")).unwrap()
+        else {
+            panic!("expected a class answer");
+        };
+
+        assert_eq!(class.returned_count, class.members.len());
+        assert_eq!(class.matched_count, None);
+        assert_eq!(class.total_member_count, None);
+        assert!(!class.truncated);
     }
 
     #[test]
