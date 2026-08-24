@@ -36,6 +36,9 @@ impl SharedIndex {
         for relative_path in relative_paths {
             module_names.insert(relative_path.clone(), module_name(sourcemap, relative_path));
 
+            if is_realization_copy(relative_path) {
+                continue;
+            }
             let Some((key, key_path)) = index_key_for(relative_path) else {
                 continue;
             };
@@ -104,11 +107,7 @@ impl SharedIndex {
         let mut best_score = 0;
         let mut best: Vec<&Entry> = Vec::new();
         for entry in &matches {
-            let module = self
-                .module_names
-                .get(&entry.relative_path)
-                .map_or(entry.relative_path.as_str(), String::as_str);
-            let score = common_segment_count(module, requiring);
+            let score = common_segment_count(self.module_of(entry), requiring);
             if score > best_score {
                 best_score = score;
                 best.clear();
@@ -122,6 +121,23 @@ impl SharedIndex {
             return Resolution::Found(only.relative_path.clone());
         }
 
+        let mut fewest_segments = usize::MAX;
+        let mut shallowest: Vec<&Entry> = Vec::new();
+        for entry in &best {
+            let depth = segment_count(self.module_of(entry));
+            if depth < fewest_segments {
+                fewest_segments = depth;
+                shallowest.clear();
+            }
+            if depth == fewest_segments {
+                shallowest.push(entry);
+            }
+        }
+
+        if let [only] = shallowest.as_slice() {
+            return Resolution::Found(only.relative_path.clone());
+        }
+
         let mut candidates: Vec<String> = matches
             .iter()
             .map(|entry| entry.relative_path.clone())
@@ -129,6 +145,25 @@ impl SharedIndex {
         candidates.sort();
         Resolution::Ambiguous(candidates)
     }
+
+    /// Where the entry sits in the instance tree, falling back to its path when it is not synced.
+    fn module_of<'a>(&'a self, entry: &'a Entry) -> &'a str {
+        self.module_names
+            .get(&entry.relative_path)
+            .map_or(entry.relative_path.as_str(), String::as_str)
+    }
+}
+
+/// Whether the path sits inside a package manager's realization directory.
+///
+/// Wally writes a second copy of every vendored package under `Packages/_Index`, and those copies
+/// carry names that collide with the project's own modules. Nothing under `_Index` is a
+/// `ModuleScript` child of a package root, so no loader can address it by name at runtime, and
+/// counting it as a candidate turns resolvable names into ties.
+fn is_realization_copy(relative_path: &str) -> bool {
+    relative_path
+        .split(['/', '\\'])
+        .any(|segment| segment.eq_ignore_ascii_case("_Index"))
 }
 
 fn module_name(sourcemap: &Sourcemap, relative_path: &str) -> String {
@@ -189,6 +224,10 @@ fn ends_with_path_suffix(path: &str, suffix: &str) -> bool {
         Some(cut) if cut > 0 => path.as_bytes()[cut - 1] == b'/' && &path[cut..] == suffix,
         _ => false,
     }
+}
+
+fn segment_count(path: &str) -> usize {
+    path.split(['/', '\\']).count()
 }
 
 fn common_segment_count(left: &str, right: &str) -> usize {
@@ -385,6 +424,35 @@ mod tests {
         assert_eq!(
             index.resolve("Config", "a/deep/Caller.luau"),
             Resolution::Found("a/deep/Config.luau".to_string())
+        );
+    }
+
+    #[test]
+    fn a_realization_copy_is_not_a_candidate_even_when_it_is_shallower() {
+        let index = index(&["Packages/_Index/Config.luau", "src/Shared/Config.luau"]);
+        assert_eq!(
+            index.resolve("Config", "elsewhere/Unmapped.luau"),
+            Resolution::Found("src/Shared/Config.luau".to_string())
+        );
+        assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn a_realization_copy_is_not_addressable_on_its_own() {
+        let index = index(&["Packages/_Index/sleitnick_signal@2.0.3/signal/init.luau"]);
+        assert!(index.is_empty());
+        assert_eq!(
+            index.resolve("Signal", "src/Shared/Consumer.luau"),
+            Resolution::NotFound
+        );
+    }
+
+    #[test]
+    fn the_shallower_candidate_wins_when_neither_is_nearer() {
+        let index = index(&["a/Config.luau", "a/b/c/Config.luau"]);
+        assert_eq!(
+            index.resolve("Config", "elsewhere/Unmapped.luau"),
+            Resolution::Found("a/Config.luau".to_string())
         );
     }
 
