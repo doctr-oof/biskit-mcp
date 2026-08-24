@@ -650,7 +650,87 @@ fn parse_definitions(
     if let Some(finished) = current {
         types.insert(finished.name.clone(), finished);
     }
+    repair_deprecation_targets(&mut types);
     (types, services, creatable)
+}
+
+/// Drops a deprecation replacement that names a class which does not declare the member.
+///
+/// The type definitions resolve a preferred descriptor by name, so a legacy alias whose
+/// replacement differs from it only by case can be pointed at an unrelated class that happens to
+/// carry a member of that name: `Instance:remove` arrives naming `MetaBreakpoint:Remove`. A
+/// replacement the named class does not declare itself is re-resolved against the class the
+/// deprecated member belongs to and its ancestry, and dropped when that finds nothing, so
+/// `deprecated_use` never carries a call that cannot run.
+fn repair_deprecation_targets(types: &mut BTreeMap<String, ApiType>) {
+    let declared: HashMap<String, BTreeSet<String>> = types
+        .iter()
+        .map(|(name, found)| {
+            (
+                name.clone(),
+                found
+                    .members
+                    .iter()
+                    .map(|member| member.name.clone())
+                    .collect(),
+            )
+        })
+        .collect();
+    let extends: HashMap<String, Option<String>> = types
+        .iter()
+        .map(|(name, found)| (name.clone(), found.extends.clone()))
+        .collect();
+
+    let mut repairs: Vec<(String, usize, Option<String>)> = Vec::new();
+    for (owner, found) in types.iter() {
+        for (index, member) in found.members.iter().enumerate() {
+            let Some(target) = member.deprecated_use.as_deref() else {
+                continue;
+            };
+            let Some((named, replacement)) = split_member(target) else {
+                continue;
+            };
+            if declared
+                .get(named)
+                .is_some_and(|members| members.contains(replacement))
+            {
+                continue;
+            }
+            let separator = &target[named.len()..=named.len()];
+            let resolved = declaring_class(owner, replacement, &declared, &extends)
+                .map(|holder| format!("{holder}{separator}{replacement}"));
+            repairs.push((owner.clone(), index, resolved));
+        }
+    }
+
+    for (owner, index, resolved) in repairs {
+        if let Some(found) = types.get_mut(&owner) {
+            found.members[index].deprecated_use = resolved;
+        }
+    }
+}
+
+fn declaring_class(
+    start: &str,
+    member: &str,
+    declared: &HashMap<String, BTreeSet<String>>,
+    extends: &HashMap<String, Option<String>>,
+) -> Option<String> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut current = Some(start);
+    while let Some(name) = current {
+        if !seen.insert(name) {
+            return None;
+        }
+        if declared
+            .get(name)
+            .is_some_and(|members| members.contains(member))
+        {
+            return Some(name.to_string());
+        }
+        current = extends.get(name).and_then(|parent| parent.as_deref());
+    }
+    None
 }
 
 struct Header {
@@ -778,6 +858,7 @@ declare extern type Instance extends Object with
 		function clone(self): Instance
 	ChildAdded: RBXScriptSignal<Instance>
 	Name: string
+	function Clone(self): Instance
 	function Destroy(self): nil
 end
 
@@ -790,6 +871,27 @@ declare extern type EnumEasingStyle_INTERNAL extends Enum with
 	Linear: EnumEasingStyle
 	Sine: EnumEasingStyle
 	function GetEnumItems(self): { EnumEasingStyle }
+end
+"#;
+
+    const DEPRECATIONS: &str = r#"declare extern type Instance extends Object with
+	@[deprecated {use = "MetaBreakpoint:Remove"}]
+		function remove(self): nil
+	@[deprecated {use = "Nowhere:Vanish"}]
+		function vanish(self): nil
+	@deprecated
+		function Remove(self): nil
+end
+
+declare extern type MetaBreakpoint extends Instance with end
+
+declare extern type Humanoid extends Instance with
+	@[deprecated {use = "Animator:LoadAnimation"}]
+		function loadAnimation(self, animation: Animation): AnimationTrack
+end
+
+declare extern type Animator extends Instance with
+	function LoadAnimation(self, animation: Animation): AnimationTrack
 end
 "#;
 
@@ -855,7 +957,7 @@ end
             class.returned_count, 2,
             "returned_count is how many came back, not how many were cut from"
         );
-        assert_eq!(class.matched_count, Some(4));
+        assert_eq!(class.matched_count, Some(5));
         assert!(class.truncated);
         assert_eq!(class.total_member_count, None, "no filter narrowed them");
     }
@@ -907,8 +1009,12 @@ end
         };
 
         assert_eq!(class.returned_count, 1);
-        assert_eq!(class.matched_count, Some(2), "clone and Name spell an n");
-        assert_eq!(class.total_member_count, Some(4));
+        assert_eq!(
+            class.matched_count,
+            Some(3),
+            "clone, Name and Clone spell an n"
+        );
+        assert_eq!(class.total_member_count, Some(5));
     }
 
     #[test]
@@ -940,6 +1046,53 @@ end
         };
         assert!(member.deprecated);
         assert_eq!(member.deprecated_use.as_deref(), Some("Instance:Clone"));
+    }
+
+    fn deprecated_use_of(query_text: &str) -> (bool, Option<String>) {
+        let (types, services, creatable) = parse_definitions(DEPRECATIONS);
+        let api = RobloxApi {
+            types,
+            services,
+            creatable,
+            docs: HashMap::new(),
+            security_level: "PluginSecurity",
+        };
+        let ApiResult {
+            answer: Answer::Member(member),
+            ..
+        } = api.answer(query(query_text)).unwrap()
+        else {
+            panic!("expected a member answer");
+        };
+        (member.deprecated, member.deprecated_use)
+    }
+
+    #[test]
+    fn a_replacement_the_named_class_does_not_declare_is_re_resolved() {
+        let (deprecated, replacement) = deprecated_use_of("Instance:remove");
+        assert!(deprecated);
+        assert_eq!(
+            replacement.as_deref(),
+            Some("Instance:Remove"),
+            "MetaBreakpoint inherits Remove rather than declaring it, so it is not the replacement"
+        );
+    }
+
+    #[test]
+    fn a_replacement_nothing_in_the_ancestry_declares_is_dropped() {
+        let (deprecated, replacement) = deprecated_use_of("Instance:vanish");
+        assert!(deprecated, "the deprecation itself still stands");
+        assert_eq!(
+            replacement, None,
+            "a replacement that cannot be resolved is absent rather than guessed"
+        );
+    }
+
+    #[test]
+    fn a_replacement_on_an_unrelated_class_that_declares_it_survives() {
+        let (deprecated, replacement) = deprecated_use_of("Humanoid:loadAnimation");
+        assert!(deprecated);
+        assert_eq!(replacement.as_deref(), Some("Animator:LoadAnimation"));
     }
 
     #[test]
