@@ -12,13 +12,17 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
-/// Every critical section here is one non-async insert or remove, so a synchronous mutex fits
-/// better than an async one: no task state machine, no yield point, no lock held across an await.
 type PendingMap =
     Arc<std::sync::Mutex<HashMap<i64, oneshot::Sender<Result<Value, ResponseError>>>>>;
 
 /// Reported to a waiting request when the read loop sees the server go away.
 pub const TERMINATED_CODE: i64 = -32000;
+
+/// JSON-RPC `MethodNotFound`, which a language server answers with when it does not implement a request at all.
+pub const METHOD_NOT_FOUND_CODE: i64 = -32601;
+
+/// Ceiling on one framed message, so a bad `Content-Length` cannot abort the process on an allocation it cannot serve.
+const MAX_MESSAGE_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ResponseError {
@@ -39,10 +43,6 @@ impl std::fmt::Display for ResponseError {
 impl std::error::Error for ResponseError {}
 
 /// The language server stopped answering at all, as opposed to failing one request.
-///
-/// The distinction matters to any caller that issues a request per file: one file's parse failure
-/// is worth skipping past, whereas a server that has stopped answering will burn a full timeout on
-/// every remaining file for no possible result.
 #[derive(Debug, Clone)]
 pub struct Unavailable {
     pub method: String,
@@ -67,6 +67,13 @@ pub fn is_unavailable(error: &anyhow::Error) -> bool {
         || error
             .downcast_ref::<ResponseError>()
             .is_some_and(|response| response.code == TERMINATED_CODE)
+}
+
+/// True when `error` means the server does not implement the request, as opposed to failing it.
+pub fn is_unsupported(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ResponseError>()
+        .is_some_and(|response| response.code == METHOD_NOT_FOUND_CODE)
 }
 
 fn unavailable(method: &str, detail: impl Into<String>) -> anyhow::Error {
@@ -217,13 +224,15 @@ impl LspConnection {
     }
 
     pub async fn shutdown(&self) {
-        let graceful = async {
-            let _: Value = self
-                .request_with_timeout("shutdown", Value::Null, Duration::from_secs(3))
-                .await?;
-            self.notify("exit", Value::Null).await
-        };
-        let _ = timeout(Duration::from_secs(5), graceful).await;
+        if !self.reader.is_finished() {
+            let graceful = async {
+                let _: Value = self
+                    .request_with_timeout("shutdown", Value::Null, Duration::from_secs(3))
+                    .await?;
+                self.notify("exit", Value::Null).await
+            };
+            let _ = timeout(Duration::from_secs(5), graceful).await;
+        }
 
         self.reader.abort();
         self.stderr_reader.abort();
@@ -252,8 +261,6 @@ fn pending_remove(
     pending.lock().ok()?.remove(&id)
 }
 
-/// `ChildStdin` is an unbuffered pipe, so the header and the body go out as one write rather than
-/// as two syscalls plus a flush.
 async fn write_message(stdin: &Arc<Mutex<ChildStdin>>, message: &Value) -> Result<()> {
     let body = serde_json::to_vec(message)?;
     let mut framed = Vec::with_capacity(body.len() + 32);
@@ -273,8 +280,6 @@ async fn read_loop(
     events: mpsc::UnboundedSender<ServerEvent>,
     configuration: Value,
 ) {
-    // Both buffers are reused for the life of the connection: a `documentSymbol` response is
-    // large, and allocating and zero-filling a fresh buffer for each one is pure overhead.
     let mut header = String::new();
     let mut body: Vec<u8> = Vec::new();
 
@@ -347,7 +352,6 @@ fn respond_to_server_request(method: &str, message: &Value, configuration: &Valu
 fn handle_notification(method: &str, message: &Value, events: &mpsc::UnboundedSender<ServerEvent>) {
     let params = message.get("params").cloned().unwrap_or(Value::Null);
     match method {
-        // Diagnostics are pulled on demand via textDocument/diagnostic, so pushes are ignored.
         "window/logMessage" | "window/showMessage" => {
             if let Some(text) = params.get("message").and_then(Value::as_str) {
                 let _ = events.send(ServerEvent::LogMessage(text.to_string()));
@@ -384,6 +388,11 @@ async fn read_message(
 
     let length =
         content_length.ok_or_else(|| anyhow!("language server message lacked Content-Length"))?;
+    if length > MAX_MESSAGE_BYTES {
+        return Err(anyhow!(
+            "language server announced a {length} byte message, over the {MAX_MESSAGE_BYTES} byte ceiling"
+        ));
+    }
     body.clear();
     body.resize(length, 0);
     stdout.read_exact(body).await?;

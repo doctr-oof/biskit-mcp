@@ -1,19 +1,11 @@
 //! Timing harness for the paths the performance audit identified as hot.
-//!
-//! Run with `cargo bench`. There is no third-party bench framework: each case is a closure timed
-//! over a sample budget and reported as a median, so two runs are directly comparable.
-//! `BISKIT_BENCH_FILTER` selects a subset of cases by substring.
-//!
-//! Cases come in pairs. The `before` case re-implements the shape the code had prior to the
-//! optimisation, inline and deliberately unshared; the `after` case calls the real code. Running
-//! both in one process on one machine is what makes the ratio between them meaningful.
 
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use biskit_mcp::config::Settings;
-use biskit_mcp::files::{FileTools, PatternSearchRequest};
+use biskit_mcp::config::{ProjectSettings, Settings};
+use biskit_mcp::files::{FileTools, PatternSearchRequest, SearchMode};
 use biskit_mcp::lines::LineIndex;
 use biskit_mcp::lsp::name_path::NamePathPattern;
 use biskit_mcp::lsp::protocol::{DocumentSymbol, DocumentSymbolResponse, Position, Range};
@@ -22,11 +14,10 @@ use biskit_mcp::lsp::session::LanguageServerHandle;
 use biskit_mcp::lsp::symbols::{SymbolNode, build_tree, disambiguate};
 use biskit_mcp::lsp::uri;
 use biskit_mcp::project::Project;
+use biskit_mcp::roblox::requires::build_or_reuse;
+use biskit_mcp::roblox::sourcemap::Sourcemap;
 
-/// Files in the generated fixture project. Large enough that the walk and the search are
-/// dominated by real work rather than by setup.
 const FIXTURE_FILES: usize = 600;
-/// Loose objects in the fixture `.git`, standing in for the object store of a real repository.
 const FIXTURE_GIT_OBJECTS: usize = 2_400;
 const SYMBOLS_PER_FILE: usize = 40;
 
@@ -42,14 +33,12 @@ fn main() {
     bench_literal_prefilter(&mut reporter, &fixture);
     bench_project_walk(&mut reporter, &fixture);
     bench_pattern_search(&mut reporter, &fixture);
+    bench_shared_require_scan(&mut reporter);
     bench_real_project(&mut reporter);
 
     reporter.finish();
 }
 
-/// The generated fixture is uniform in a way no real codebase is: same file size, same symbol
-/// density, no vendored packages, no sourcemap. Pointing `BISKIT_BENCH_PROJECT` at a checkout
-/// measures the same paths against a tree that was not built to flatter them.
 fn bench_real_project(reporter: &mut Reporter) {
     let Ok(root) = std::env::var("BISKIT_BENCH_PROJECT") else {
         reporter.note(
@@ -123,18 +112,15 @@ fn bench_real_project(reporter: &mut Reporter) {
                 paths_exclude_glob: None,
                 restrict_to_code_files: true,
                 max_matches: 200,
+                mode: SearchMode::Snippets,
+                case_insensitive: false,
+                dot_matches_newline: false,
             })
             .unwrap();
-        black_box(found.matches.len());
+        black_box(found.matches.map(|matches| matches.len()));
     });
 }
 
-// ---------------------------------------------------------------------------------------------
-// E1: name path matching
-// ---------------------------------------------------------------------------------------------
-
-/// `collect_matches` runs this once per symbol node in every scanned file, so one comparison is
-/// multiplied by the whole project's symbol count.
 fn bench_name_path_matching(reporter: &mut Reporter) {
     let nodes = flat_symbols(SYMBOLS_PER_FILE);
     let miss = NamePathPattern::parse("GetPlayerMaid", false);
@@ -147,8 +133,6 @@ fn bench_name_path_matching(reporter: &mut Reporter) {
             || {
                 let mut found = 0usize;
                 for node in &nodes {
-                    // The pre-optimisation shape: split the stored name path into owned segments,
-                    // then compare the segment slice.
                     let ancestors: Vec<String> =
                         node.name_path.split('/').map(str::to_string).collect();
                     if naive_matches(pattern, &ancestors) {
@@ -175,7 +159,6 @@ fn bench_name_path_matching(reporter: &mut Reporter) {
     }
 }
 
-/// Mirrors the allocating comparison `NamePathPattern::matches` used to perform.
 fn naive_matches(pattern: &NamePathPattern, candidate: &[String]) -> bool {
     let segments = pattern.segments();
     if segments.is_empty() || candidate.is_empty() || segments.len() > candidate.len() {
@@ -192,12 +175,6 @@ fn naive_matches(pattern: &NamePathPattern, candidate: &[String]) -> bool {
         .all(|(index, expected)| tail[index].as_str() == expected.as_str())
 }
 
-// ---------------------------------------------------------------------------------------------
-// E2: symbol tree construction
-// ---------------------------------------------------------------------------------------------
-
-/// Every `documentSymbol` response is converted through `disambiguate`, once per sibling group at
-/// every level of the tree.
 fn bench_symbol_tree_build(reporter: &mut Reporter) {
     let response = document_symbols(SYMBOLS_PER_FILE);
     let flat: Vec<DocumentSymbol> = match &response {
@@ -205,7 +182,6 @@ fn bench_symbol_tree_build(reporter: &mut Reporter) {
         DocumentSymbolResponse::Flat(_) => unreachable!("fixture is nested"),
     };
 
-    /// The pre-optimisation shape: two hash maps per sibling group regardless of duplicates.
     fn always_maps(symbols: &[DocumentSymbol]) -> Vec<String> {
         let mut totals = std::collections::HashMap::<&str, usize>::new();
         for symbol in symbols {
@@ -226,7 +202,6 @@ fn bench_symbol_tree_build(reporter: &mut Reporter) {
             .collect()
     }
 
-    /// Both sides visit every sibling group in the tree, so only the naming differs.
     fn walk(symbols: &[DocumentSymbol], name: &impl Fn(&[DocumentSymbol]) -> Vec<String>) -> usize {
         let mut total = name(symbols).iter().map(String::len).sum();
         for symbol in symbols {
@@ -248,11 +223,6 @@ fn bench_symbol_tree_build(reporter: &mut Reporter) {
     });
 }
 
-// ---------------------------------------------------------------------------------------------
-// B6: URI encoding
-// ---------------------------------------------------------------------------------------------
-
-/// Built at least three times per request against a file before B5 cached it.
 fn bench_uri_from_path(reporter: &mut Reporter) {
     let plain = PathBuf::from(if cfg!(windows) {
         r"C:\Users\dev\project\src\Services\PlayerService.luau"
@@ -263,7 +233,6 @@ fn bench_uri_from_path(reporter: &mut Reporter) {
 
     for (label, path) in [("unescaped", &plain), ("escaped", &escaped)] {
         reporter.case(&format!("B6 uri encode, {label} [before]"), 1, || {
-            // The pre-optimisation shape: one heap allocation per escaped byte.
             let text = path.to_str().unwrap().replace('\\', "/");
             let mut encoded = String::from("file:///");
             for byte in text.bytes() {
@@ -284,12 +253,6 @@ fn bench_uri_from_path(reporter: &mut Reporter) {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// A7: line slicing
-// ---------------------------------------------------------------------------------------------
-
-/// `include_body` renders every matching symbol out of the same file, and each render used to
-/// re-split the whole file into lines.
 fn bench_line_slicing(reporter: &mut Reporter) {
     let content = luau_source(SYMBOLS_PER_FILE);
     let spans: Vec<(usize, usize)> = (0..SYMBOLS_PER_FILE)
@@ -302,7 +265,6 @@ fn bench_line_slicing(reporter: &mut Reporter) {
         || {
             let mut total = 0usize;
             for (start, end) in &spans {
-                // The pre-optimisation shape: rebuild the whole line vector per rendered symbol.
                 let lines: Vec<&str> = content.lines().collect();
                 let to = (*end).min(lines.len().saturating_sub(1));
                 total += lines[*start..=to].join("\n").len();
@@ -325,12 +287,6 @@ fn bench_line_slicing(reporter: &mut Reporter) {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
-// A1: literal pre-filter
-// ---------------------------------------------------------------------------------------------
-
-/// The pre-filter's whole value is how many `documentSymbol` round trips it removes, so the case
-/// reports the rejection rate next to the scan cost.
 fn bench_literal_prefilter(reporter: &mut Reporter, fixture: &Fixture) {
     let files = fixture.luau_files();
     let bytes: usize = files
@@ -344,7 +300,6 @@ fn bench_literal_prefilter(reporter: &mut Reporter, fixture: &Fixture) {
         .build()
         .unwrap();
 
-    // The real thing, disk read included, which is what the scan actually pays.
     let survivors = runtime
         .block_on(prefilter_by_literal(files.clone(), Some("GetPlayerMaid")))
         .unwrap()
@@ -371,11 +326,6 @@ fn bench_literal_prefilter(reporter: &mut Reporter, fixture: &Fixture) {
     });
 }
 
-// ---------------------------------------------------------------------------------------------
-// D1: project walk
-// ---------------------------------------------------------------------------------------------
-
-/// The walk that every project-wide `find_symbol` with no `relative_path` starts with.
 fn bench_project_walk(reporter: &mut Reporter, fixture: &Fixture) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -385,7 +335,6 @@ fn bench_project_walk(reporter: &mut Reporter, fixture: &Fixture) {
     let root = fixture.project.root().to_path_buf();
 
     reporter.case("D1 walk project for .luau [before]", FIXTURE_FILES, || {
-        // The pre-optimisation shape: hidden(false) with no filter_entry, so .git is descended.
         let mut builder = ignore::WalkBuilder::new(&root);
         builder
             .hidden(false)
@@ -427,20 +376,12 @@ fn bench_project_walk(reporter: &mut Reporter, fixture: &Fixture) {
     });
 }
 
-// ---------------------------------------------------------------------------------------------
-// D3 and D4: pattern search
-// ---------------------------------------------------------------------------------------------
-
-/// The common case is a pattern that matches nothing, where every line index built is a line
-/// index thrown away.
 fn bench_pattern_search(reporter: &mut Reporter, fixture: &Fixture) {
     let tools = FileTools::new(fixture.project.clone(), Settings::default());
     let root = fixture.project.root().to_path_buf();
     let pattern = "ThisIdentifierIsNowhereInTheFixture";
 
     reporter.case("D3 search, no match [before]", FIXTURE_FILES, || {
-        // The pre-optimisation shape: relativize every file, then build both line structures
-        // before the regex has run once.
         let regex = regex::RegexBuilder::new(pattern)
             .multi_line(true)
             .dot_matches_new_line(true)
@@ -493,26 +434,107 @@ fn bench_pattern_search(reporter: &mut Reporter, fixture: &Fixture) {
         paths_exclude_glob: None,
         restrict_to_code_files: true,
         max_matches: 200,
+        mode: SearchMode::Snippets,
+        case_insensitive: false,
+        dot_matches_newline: false,
     };
 
     reporter.case("D3 search, no match [after]", FIXTURE_FILES, || {
         let result = tools
             .search_for_pattern(request("ThisIdentifierIsNowhereInTheFixture"))
             .unwrap();
-        black_box(result.matches.len());
+        black_box(result.matches.map(|matches| matches.len()));
     });
 
     reporter.case("D3 search, many matches [after]", FIXTURE_FILES, || {
         let result = tools
             .search_for_pattern(request("function Service"))
             .unwrap();
-        black_box(result.matches.len());
+        black_box(result.matches.map(|matches| matches.len()));
     });
 }
 
-// ---------------------------------------------------------------------------------------------
-// Fixture
-// ---------------------------------------------------------------------------------------------
+fn bench_shared_require_scan(reporter: &mut Reporter) {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".biskit")).unwrap();
+
+    let mut children = String::new();
+    for index in 0..SHARED_FIXTURE_FILES {
+        let module = root.join("src").join(format!("Package{}", index % 24));
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            module.join(format!("Module{index}.luau")),
+            format!(
+                "local A = shared(\"Module{}\")\n\
+                 local B = shared(\"Package{}/Module{}\")\n\
+                 local C = shared(\"Absent{index}\")\n\
+                 local D = shared(name)\n\
+                 local E = require(script.Parent.Sibling)\n\
+                 shared.flag = true\n{}",
+                (index + 1) % SHARED_FIXTURE_FILES,
+                (index + 2) % 24,
+                (index + 2) % SHARED_FIXTURE_FILES,
+                luau_source(SYMBOLS_PER_FILE)
+            ),
+        )
+        .unwrap();
+        children.push_str(&format!(
+            "{}{{\"name\": \"Module{index}\", \"className\": \"ModuleScript\", \
+             \"filePaths\": [\"src/Package{}/Module{index}.luau\"]}}",
+            if index == 0 { "" } else { "," },
+            index % 24
+        ));
+    }
+    std::fs::write(
+        root.join("sourcemap.json"),
+        format!(
+            "{{\"name\": \"Bench\", \"className\": \"DataModel\", \"children\": [{{\
+             \"name\": \"ReplicatedStorage\", \"className\": \"ReplicatedStorage\", \
+             \"children\": [{children}]}}]}}"
+        ),
+    )
+    .unwrap();
+
+    let project = Project::open(root).expect("fixture project");
+
+    let settings = |shared_require: bool| Settings {
+        project: ProjectSettings {
+            shared_require,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let off = settings(false);
+    let on = settings(true);
+    let sourcemap = Sourcemap::load(&project, &on).expect("fixture sourcemap");
+
+    let edges = build_or_reuse(None, &project, &on, &sourcemap)
+        .expect("graph builds")
+        .len();
+    reporter.note(format!(
+        "shared() scan over {SHARED_FIXTURE_FILES} modules, {edges} in the graph"
+    ));
+
+    reporter.case("S1 graph build, shared off", SHARED_FIXTURE_FILES, || {
+        black_box(
+            build_or_reuse(None, &project, &off, &sourcemap)
+                .unwrap()
+                .len(),
+        );
+    });
+
+    reporter.case("S1 graph build, shared on", SHARED_FIXTURE_FILES, || {
+        black_box(
+            build_or_reuse(None, &project, &on, &sourcemap)
+                .unwrap()
+                .len(),
+        );
+    });
+}
+
+const SHARED_FIXTURE_FILES: usize = 600;
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -525,7 +547,6 @@ impl Fixture {
         let root = dir.path();
         std::fs::create_dir_all(root.join(".biskit")).unwrap();
 
-        // A repository-shaped .git, which the walk has no reason to descend into.
         let objects = root.join(".git").join("objects");
         for bucket in 0..16 {
             let bucket_dir = objects.join(format!("{bucket:02x}"));
@@ -626,12 +647,6 @@ fn flat_symbols(count: usize) -> Vec<SymbolNode> {
     nodes
 }
 
-// ---------------------------------------------------------------------------------------------
-// Reporting
-// ---------------------------------------------------------------------------------------------
-
-/// Each case runs until it has spent this long, so short cases still gather enough samples to be
-/// stable and long cases still finish.
 const SAMPLE_BUDGET: Duration = Duration::from_millis(350);
 const WARMUP_ROUNDS: usize = 3;
 const MAX_SAMPLES: usize = 2_000;
@@ -655,8 +670,6 @@ impl Reporter {
         self.notes.push(text);
     }
 
-    /// `units` is how many logical items one round covers, so a case that batches work still
-    /// reports a per-item figure next to the per-round one.
     fn case(&mut self, name: &str, units: usize, mut body: impl FnMut()) {
         if !self.filter.is_empty() && !name.contains(&self.filter) {
             return;

@@ -197,9 +197,18 @@ These are all of the tools Biskit provides your agent. You can exclude them via 
 - **Memory**: `list_memories`, `read_memory`, `create_memory`, `edit_memory`, `rename_memory`,
   `delete_memory`.
 - **Code intelligence**: `get_symbols_overview`, `find_symbol`, `find_declaration`,
-  `find_referencing_symbols`, `get_file_diagnostics`, `get_symbol_diagnostics`,
-  `restart_language_server`.
-- **Files and orientation**: `list_dir`, `find_file`, `search_for_pattern`, `initial_instructions`.
+  `get_type_definition`, `find_referencing_symbols`, `get_file_diagnostics`,
+  `get_symbol_diagnostics`, `restart_language_server`.
+- **Types**: `explain_symbol` for the type the checker inferred rather than the one written down,
+  `get_inlay_hints` for those types over a line range, `get_signature_help` for the arguments of a
+  call.
+- **Roblox**: `resolve_instance_path` translates between the DataModel and the files on disk in
+  either direction, `get_require_graph` reports what a module requires and what requires it plus
+  any require cycles, `query_roblox_api` answers questions about the real Roblox API from the type
+  definitions Biskit already caches, and `get_module_context` composes all of it into one call for a
+  module you have not seen before.
+- **Files and orientation**: `list_dir`, `find_file`, `search_for_pattern`, `initial_instructions`,
+  `get_status`.
 
 ### Memories
 
@@ -221,14 +230,58 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `lsp.roblox_security_level` | `PluginSecurity` | Which Roblox API dump to load |
 | `lsp.sourcemap` | `sourcemap.json` | Rojo sourcemap path, or null to disable |
 | `lsp.server_settings` | empty | Raw luau-lsp settings in VS Code dotted-key form |
-| `project.ignored_paths` | empty | Extra gitignore-style exclusions, applied to every project walk |
+| `lsp.max_open_documents` | `256` | Files kept open in the language server before the least recently used are closed, 0 for no ceiling |
+| `project.ignored_paths` | empty | Extra gitignore-style exclusions, matched against the project root on every walk and forwarded to luau-lsp |
+| `project.respect_gitignore` | `true` | Honour `.gitignore` when walking the project. Files the sourcemap names are scanned either way |
 | `project.memory_only` | `false` | Run without the language server, see below |
+| `project.shared_require` | `true` | Count `shared("Name")` as a dependency edge, see below |
 | `tools.excluded` | empty | Tool names to hide from the agent |
 | `tools.max_answer_chars` | `150000` | Ceiling on one tool result, 0 to lift it |
 | `tools.max_reference_matches` | `200` | Cap on references from `find_referencing_symbols` |
+| `tools.symbol_cache` | `true` | Keep symbol trees across sessions, see below |
+| `tools.max_cached_symbol_files` | `4000` | Trees kept before the least used are dropped, 0 for no ceiling |
 
 A structured result over `max_answer_chars` is refused with a message naming what to narrow. A text
 result, such as a memory, is cut instead and says how much was withheld.
+
+### Symbol index cache
+
+A project-wide `find_symbol` asks the language server for a symbol tree once per file that survives
+the literal prefilter, through a single stdio pipe, every session from cold. Almost none of those
+files changed since the last session asked about them.
+
+Biskit stores the trees in `.biskit/cache/symbols.json`, keyed by each file's path, size, and
+modification time, and answers from the index when all three still match. The directory writes its
+own `.gitignore`, so nothing in it is ever committed. A file that has been edited, or deleted since
+it was indexed, is never answered from the index.
+
+Clear it with `biskit-mcp cache clear`, or turn it off with `tools.symbol_cache: false`.
+
+### The `shared()` require
+
+Sawhorse Roblox frameworks give the `shared` global a `__call` metamethod, so `shared("Foo")` is a
+runtime require of the module whose file is named `Foo.luau`. The carpenter fork teaches the language
+server to resolve it exactly as it resolves `require`, which is why hover, diagnostics, go to
+definition, signature help, and every other LSP-backed tool already understand it.
+
+Biskit's require graph does not go through the language server, so it resolves the same calls itself,
+the same way the fork does:
+
+- The argument has to be a string literal. `shared(name)` and `shared("a" .. b)` are reported under
+  `unresolved` with a reason, the same as any require Biskit cannot read statically.
+- A bare stem (`shared("Combat")`) or a partial path (`shared("Jobs/Runner")`) both resolve, and both
+  are case-insensitive. `dir/init.luau` is addressed as `dir`.
+- Where several files carry the name, the one nearest the requiring module in the instance tree wins.
+  A genuine tie is reported under `unresolved` listing every candidate, rather than guessed at.
+- `shared.someField` is still ordinary table access and is never treated as a require, and neither is
+  a `shared` the file bound locally.
+
+Turn it off with `project.shared_require: false` if your project does not use the paradigm. Note that
+this only stops Biskit's require graph from following those calls. The fork has no matching switch, so
+the language server keeps resolving them and `get_status` will report the disagreement.
+
+`get_status` also warns when `lsp.version` is pinned below `v0.2.0`, the first carpenter release that
+resolves `shared()` at all.
 
 ### Memory-only mode
 
@@ -236,13 +289,13 @@ Set `project.memory_only: true` to run Biskit as a memory, file, and search serv
 intelligence at all:
 
 - luau-lsp is never downloaded and no language server process starts.
-- The seven code-intelligence tools are not registered, so the agent never sees them.
+- The code intelligence and Roblox tools are not registered, so the agent never sees them.
 - The MCP `instructions` field and `initial_instructions` both say the mode is on and name the tools
   that are unavailable.
 - `biskit-mcp doctor` reports the mode and skips every LSP check.
 
-Memory, `list_dir`, `find_file`, and `search_for_pattern` keep working. Put it in
-`settings.local.yml` to turn it on for yourself only.
+Memory, `list_dir`, `find_file`, `search_for_pattern`, `initial_instructions`, and `get_status` keep
+working. Put it in `settings.local.yml` to turn it on for yourself only.
 
 ## Commands
 
@@ -253,9 +306,11 @@ Memory, `list_dir`, `find_file`, and `search_for_pattern` keep working. Put it i
 | `biskit-mcp setup` | Register Biskit in the agent config files a project uses |
 | `biskit-mcp doctor` | Verify settings, acquisition, and sourcemap state |
 | `biskit-mcp upgrade` | Replace this executable with a published release |
+| `biskit-mcp cache clear` | Delete the stored symbol index for a project |
 | `biskit-mcp hook session-start` | Emit SessionStart context for Claude Code |
 
-`start`, `doctor`, and `hook session-start` discover the project root by searching upwards. `init`
+`start`, `doctor`, `cache clear`, and `hook session-start` discover the project root by searching
+upwards. `init`
 and `setup` always use the working directory unless you pass `--project`. On `setup`,
 `--project-from-cwd` means something different: it does not choose the directory being configured,
 it writes that flag into the registration the command generates. `upgrade` has no project at all.

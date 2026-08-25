@@ -94,7 +94,6 @@ fn resolve_tag(requested: Option<String>) -> Result<String> {
     Ok(tag.to_string())
 }
 
-/// Releases are tagged `v0.1.4`, so a bare version number is accepted too.
 fn normalize_tag(value: &str) -> String {
     if value.starts_with(|character: char| character.is_ascii_digit()) {
         return format!("v{value}");
@@ -111,7 +110,6 @@ fn expected_digest(sums: &str, asset: &str) -> Option<String> {
     })
 }
 
-/// Entry paths are never written to disk, so only the file name matters here.
 fn extract_binary(archive: &[u8], asset: &str) -> Result<Vec<u8>> {
     if asset.ends_with(".zip") {
         return extract_from_zip(archive);
@@ -185,8 +183,6 @@ fn install(current: &Path, binary: &[u8]) -> Result<()> {
         .with_context(|| format!("could not write {}", staged.display()))?;
     make_executable(&staged)?;
 
-    // Windows refuses to overwrite a running image but allows it to be renamed, so the
-    // current binary is moved aside rather than replaced in place.
     if let Err(error) = std::fs::rename(current, &backup) {
         let _ = std::fs::remove_file(&staged);
         return Err(error).with_context(|| format!("could not move {} aside", current.display()));

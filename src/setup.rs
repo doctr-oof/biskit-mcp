@@ -255,7 +255,6 @@ fn hook_command(command: &str, project_from_cwd: bool) -> String {
     format!("{head} hook session-start{suffix}")
 }
 
-/// Matches any Biskit session-start hook, so re-running with different flags never duplicates it.
 fn holds_biskit_session_start(block: &Value) -> bool {
     let Some(entries) = block.get("hooks").and_then(Value::as_array) else {
         return false;

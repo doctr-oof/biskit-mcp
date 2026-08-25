@@ -1,16 +1,8 @@
 use std::borrow::Cow;
 
 /// Line boundaries of one file, computed once and reused.
-///
-/// Both the pattern search and the symbol renderer need to turn byte offsets and line numbers into
-/// text. Each used to run `content.lines().collect::<Vec<&str>>()` at the point of use, which
-/// rebuilds a vector over the whole file for every match or every rendered symbol. Building the
-/// boundaries once per file and slicing the original string keeps the per-use cost proportional to
-/// the snippet rather than to the file.
 pub struct LineIndex<'a> {
     content: &'a str,
-    /// Byte offset each line begins at. Carries one trailing entry when the file ends with a
-    /// newline, which `len` accounts for rather than removing, so `end_of` can rely on it.
     starts: Vec<usize>,
 }
 
@@ -24,8 +16,7 @@ impl<'a> LineIndex<'a> {
         Self { content, starts }
     }
 
-    /// Line count as `str::lines` counts them: a trailing newline closes the last line rather than
-    /// opening an empty one.
+    /// Line count as `str::lines` counts them: a trailing newline closes the last line rather than opening an empty one.
     pub fn len(&self) -> usize {
         if self.content.is_empty() {
             return 0;
@@ -40,6 +31,18 @@ impl<'a> LineIndex<'a> {
         self.len() == 0
     }
 
+    /// The file the index was built over, for callers that need the text behind a range.
+    pub fn content(&self) -> &'a str {
+        self.content
+    }
+
+    /// The 0-based line and column the byte at `offset` sits on.
+    pub fn position_of(&self, offset: usize) -> (usize, usize) {
+        let line = self.line_of(offset);
+        let column = offset.saturating_sub(self.starts.get(line).copied().unwrap_or(0));
+        (line, column)
+    }
+
     /// The 0-based line the byte at `offset` sits on.
     pub fn line_of(&self, offset: usize) -> usize {
         match self.starts.binary_search(&offset) {
@@ -48,16 +51,12 @@ impl<'a> LineIndex<'a> {
         }
     }
 
-    /// `line` pulled back inside the file, so a caller that widened a range by a context window
-    /// can report the line number it actually got.
+    /// `line` pulled back inside the file, so a caller that widened a range by a context window can report the line number it actually got.
     pub fn clamp_line(&self, line: usize) -> usize {
         line.min(self.len().saturating_sub(1))
     }
 
     /// Lines `from` through `to` inclusive, without their trailing line terminator.
-    ///
-    /// Both ends are clamped into the file, and a `from` past the end yields the empty string,
-    /// matching what slicing a collected line vector used to do.
     pub fn slice(&self, from: usize, to: usize) -> &'a str {
         if self.is_empty() || from >= self.len() {
             return "";
@@ -70,10 +69,6 @@ impl<'a> LineIndex<'a> {
     }
 
     /// `slice`, with CRLF terminators folded to LF.
-    ///
-    /// `str::lines` drops the carriage return, so a snippet joined from it never carried one;
-    /// borrowing the file's own bytes would otherwise start leaking `\r` into tool output on
-    /// files written on Windows.
     pub fn text(&self, from: usize, to: usize) -> Cow<'a, str> {
         let raw = self.slice(from, to);
         if raw.as_bytes().contains(&b'\r') {
@@ -82,7 +77,6 @@ impl<'a> LineIndex<'a> {
         Cow::Borrowed(raw)
     }
 
-    /// Byte offset one past the last character of `line`, excluding its line terminator.
     fn end_of(&self, line: usize) -> usize {
         let Some(next) = self.starts.get(line + 1) else {
             return self.content.len();
@@ -95,12 +89,46 @@ impl<'a> LineIndex<'a> {
     }
 }
 
+/// The byte offset in `line` that an LSP `character` column points at.
+///
+/// LSP columns are UTF-16 code units unless `positionEncoding` was negotiated, which this crate
+/// never does. The result is always a char boundary, and a column past the end of the line clamps
+/// to its length, so the return value is always safe to slice with.
+pub fn utf16_column_to_byte(line: &str, column: usize) -> usize {
+    if line.is_ascii() {
+        return column.min(line.len());
+    }
+
+    let mut units = 0usize;
+    for (offset, character) in line.char_indices() {
+        if units >= column {
+            return offset;
+        }
+        units += character.len_utf16();
+    }
+    line.len()
+}
+
+/// The LSP `character` column of the byte at `offset` in `line`, the inverse of `utf16_column_to_byte`.
+pub fn byte_to_utf16_column(line: &str, offset: usize) -> usize {
+    if line.is_ascii() {
+        return offset.min(line.len());
+    }
+
+    let mut units = 0usize;
+    for (at, character) in line.char_indices() {
+        if at >= offset {
+            return units;
+        }
+        units += character.len_utf16();
+    }
+    units
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The index has to agree with `str::lines` everywhere, because that is what every caller
-    /// used before it existed.
     fn assert_matches_lines(content: &str) {
         let index = LineIndex::new(content);
         let lines: Vec<&str> = content.lines().collect();
@@ -165,5 +193,41 @@ mod tests {
         let index = LineIndex::new("a\r\nb\rc\n");
         assert_eq!(index.text(0, 1), "a\nb\rc");
         assert!(matches!(index.text(0, 0), Cow::Borrowed("a")));
+    }
+
+    #[test]
+    fn utf16_columns_round_trip_through_byte_offsets() {
+        for line in [
+            "local Combat = {}",
+            "local naïve = 1",
+            "-- 日本語 comment\u{0}",
+            "local emoji = \"😀\" -- tail",
+            "",
+        ] {
+            let mut units = 0usize;
+            for (offset, character) in line.char_indices() {
+                assert_eq!(utf16_column_to_byte(line, units), offset, "{line:?}");
+                assert_eq!(byte_to_utf16_column(line, offset), units, "{line:?}");
+                units += character.len_utf16();
+            }
+            assert_eq!(utf16_column_to_byte(line, units), line.len(), "{line:?}");
+            assert_eq!(byte_to_utf16_column(line, line.len()), units, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_column_past_the_end_of_the_line_clamps_rather_than_panicking() {
+        let line = "local naïve = 1";
+        assert_eq!(utf16_column_to_byte(line, 9_999), line.len());
+        assert_eq!(&line[utf16_column_to_byte(line, 9_999)..], "");
+        assert_eq!(byte_to_utf16_column(line, 9_999), line.chars().count());
+    }
+
+    #[test]
+    fn a_column_inside_a_surrogate_pair_lands_on_a_char_boundary() {
+        let line = "😀ab";
+        let at = utf16_column_to_byte(line, 1);
+        assert!(line.is_char_boundary(at));
+        assert_eq!(&line[at..], "ab");
     }
 }

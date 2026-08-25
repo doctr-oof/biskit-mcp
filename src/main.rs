@@ -15,6 +15,9 @@ use biskit_mcp::{lsp, project, prompts, setup, upgrade};
 
 const PROJECT_ENV: &str = "BISKIT_PROJECT";
 
+/// `root_source` for a root that was accepted without any marker vouching for it.
+const CWD_ROOT_SOURCE: &str = "working directory";
+
 #[derive(Parser)]
 #[command(
     name = "biskit-mcp",
@@ -28,62 +31,46 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the MCP server over stdio. This is the default.
     Start {
-        /// Project root. Defaults to the nearest marked ancestor of the working directory.
         #[arg(long)]
         project: Option<PathBuf>,
-        /// Use the working directory as the project root without searching upwards.
         #[arg(long, conflicts_with = "project")]
         project_from_cwd: bool,
     },
-    /// Create the .biskit folder and its default settings files.
     Init {
-        /// Project root. Defaults to the working directory.
         #[arg(long)]
         project: Option<PathBuf>,
     },
-    /// Check that the language server can be acquired and the settings parse.
     Doctor {
-        /// Project root. Defaults to the nearest marked ancestor of the working directory.
         #[arg(long)]
         project: Option<PathBuf>,
-        /// Use the working directory as the project root without searching upwards.
         #[arg(long, conflicts_with = "project")]
         project_from_cwd: bool,
     },
-    /// Register Biskit with the agents used in a project.
     Setup {
-        /// Project root. Defaults to the working directory.
         #[arg(long)]
         project: Option<PathBuf>,
-        /// Agent to configure. Repeatable. Defaults to whichever are already set up.
         #[arg(long = "client", value_enum)]
         clients: Vec<Client>,
-        /// Also add the Claude Code SessionStart hook.
         #[arg(long)]
         hooks: bool,
-        /// Which Claude Code settings file the hook is written to.
         #[arg(long, value_enum, default_value = "local")]
         hooks_target: HooksTarget,
-        /// Write `--project-from-cwd` into the generated registration, pinning the
-        /// server to this project instead of letting it search upwards.
         #[arg(long)]
         project_from_cwd: bool,
-        /// Command the agent launches. Must resolve on PATH.
         #[arg(long, default_value = setup::DEFAULT_COMMAND)]
         command: String,
-        /// Report what would change without writing anything.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Replace this executable with a published release. Touches nothing else.
     Upgrade {
-        /// Release tag to install, for example "v0.1.4". Defaults to the latest release.
         #[arg(long)]
         tag: Option<String>,
     },
-    /// Emit agent hook payloads.
+    Cache {
+        #[command(subcommand)]
+        which: CacheCommand,
+    },
     Hook {
         #[command(subcommand)]
         which: HookCommand,
@@ -91,13 +78,20 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum HookCommand {
-    /// Emit SessionStart additionalContext for Claude Code.
-    SessionStart {
-        /// Project root. Defaults to the nearest marked ancestor of the working directory.
+enum CacheCommand {
+    Clear {
         #[arg(long)]
         project: Option<PathBuf>,
-        /// Use the working directory as the project root without searching upwards.
+        #[arg(long, conflicts_with = "project")]
+        project_from_cwd: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookCommand {
+    SessionStart {
+        #[arg(long)]
+        project: Option<PathBuf>,
         #[arg(long, conflicts_with = "project")]
         project_from_cwd: bool,
     },
@@ -136,6 +130,13 @@ fn main() -> Result<()> {
             project_from_cwd,
         } => run_doctor(RootRequest::new(project, project_from_cwd)),
         Command::Upgrade { tag } => upgrade::run(tag),
+        Command::Cache {
+            which:
+                CacheCommand::Clear {
+                    project,
+                    project_from_cwd,
+                },
+        } => run_cache_clear(RootRequest::new(project, project_from_cwd)),
         Command::Hook {
             which:
                 HookCommand::SessionStart {
@@ -146,7 +147,6 @@ fn main() -> Result<()> {
     }
 }
 
-/// stdout carries the JSON-RPC stream, so every log line must go to stderr.
 fn install_tracing() {
     let filter = EnvFilter::try_from_env("BISKIT_LOG")
         .unwrap_or_else(|_| EnvFilter::new("biskit=info,warn"));
@@ -157,7 +157,6 @@ fn install_tracing() {
         .init();
 }
 
-/// How a command wants its project root resolved before any explicit override is applied.
 struct RootRequest {
     explicit: Option<PathBuf>,
     discover: bool,
@@ -195,7 +194,7 @@ fn resolve_root(request: RootRequest) -> Result<(PathBuf, &'static str)> {
 
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     if !request.discover {
-        return Ok((cwd, "working directory"));
+        return Ok((cwd, CWD_ROOT_SOURCE));
     }
 
     match project::discover_root(&cwd) {
@@ -234,13 +233,14 @@ fn run_server(request: RootRequest) -> Result<()> {
         "serving project {} (root from {root_source})",
         project.root().display()
     );
+    bootstrap_on_startup(&project, root_source);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
     runtime.block_on(async move {
-        let biskit = Biskit::new(project, settings);
+        let biskit = Biskit::new(project, settings, root_source);
         biskit.warm_up();
         let service = biskit.clone().serve(stdio()).await?;
         let outcome = service.waiting().await;
@@ -248,6 +248,55 @@ fn run_server(request: RootRequest) -> Result<()> {
         outcome?;
         anyhow::Ok(())
     })
+}
+
+/// Lays `.biskit` down at startup so its settings can be edited before the first tool call.
+///
+/// A root that no marker vouched for is left alone: `.biskit` is the highest-priority entry in
+/// [`project::ROOT_MARKERS`], so planting one in a stray working directory would outrank the real
+/// project root for every later discovery. A project Biskit cannot write to still serves every
+/// read-only tool, so a failure here is reported rather than fatal.
+fn bootstrap_on_startup(project: &Project, root_source: &str) {
+    let biskit = project.biskit_dir();
+    if root_source == CWD_ROOT_SOURCE {
+        tracing::debug!(
+            target: "biskit",
+            "root came from the {CWD_ROOT_SOURCE}, so {} was left uncreated",
+            biskit.display()
+        );
+        return;
+    }
+
+    let report = match project.bootstrap() {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(
+                target: "biskit",
+                "could not initialise {}: {error:#}",
+                biskit.display()
+            );
+            return;
+        }
+    };
+
+    let created: Vec<&str> = [
+        (report.created_biskit_dir, project::BISKIT_DIR),
+        (report.created_gitignore, ".gitignore"),
+        (report.created_settings, project::SETTINGS_FILE),
+        (report.created_local_settings, project::LOCAL_SETTINGS_FILE),
+    ]
+    .into_iter()
+    .filter_map(|(created, name)| created.then_some(name))
+    .collect();
+
+    if !created.is_empty() {
+        tracing::info!(
+            target: "biskit",
+            "initialised {} ({})",
+            biskit.display(),
+            created.join(", ")
+        );
+    }
 }
 
 fn run_init(request: RootRequest) -> Result<()> {
@@ -388,6 +437,18 @@ fn run_doctor(request: RootRequest) -> Result<()> {
 
     let memories = MemoryStore::new(project).list()?;
     println!("memories          {}", memories.len());
+    Ok(())
+}
+
+fn run_cache_clear(request: RootRequest) -> Result<()> {
+    let (root, _) = resolve_root(request)?;
+    let project = Project::open(root)?;
+    let directory = lsp::cache::cache_dir(&project);
+
+    match lsp::cache::SymbolCache::clear(&project)? {
+        true => println!("removed {}", directory.display()),
+        false => println!("nothing cached at {}", directory.display()),
+    }
     Ok(())
 }
 

@@ -68,9 +68,15 @@ lsp:
   # watch_sourcemap: true
 
   # Raw luau-lsp settings passed straight through, in VS Code dotted-key form.
-  # Anything valid in the luau-lsp VS Code extension works here.
+  # Anything valid in the luau-lsp VS Code extension works here, and anything set
+  # here wins over the defaults Biskit sends.
+  #
+  # Biskit turns the luau-lsp.inlayHints.* keys on by default, because luau-lsp
+  # ships them off and get_inlay_hints would then have nothing to report. Turn any
+  # of them back off here.
   # server_settings:
   #   luau-lsp.diagnostics.strictDatamodelTypes: true
+  #   luau-lsp.inlayHints.variableTypes: false
 
   # How long to wait for the language server to become ready, in milliseconds.
   # startup_timeout_ms: 60000
@@ -81,15 +87,36 @@ lsp:
   # How long to wait for diagnostics to settle after opening a file, in milliseconds.
   # diagnostics_settle_ms: 1500
 
+  # How many files may stay open in the language server at once. Every file a tool
+  # reaches for is opened there and stays in its working set, so an unbounded set
+  # makes every later request answer against more documents than the one before it.
+  # Once the ceiling is passed the least recently used files are closed again;
+  # reaching for one of them later reopens it. Set to 0 for no ceiling.
+  # max_open_documents: 256
+
 project:
   # Extra paths excluded from every walk: find_file, list_dir, search_for_pattern,
   # and the project scan that find_symbol runs when given no relative_path.
   # Gitignore syntax, one pattern per entry, for example "Packages/" or
   # "**/node_modules". A leading "!" is taken literally rather than as a
   # re-include, since every entry here names something to exclude.
+  #
+  # These are also handed to luau-lsp as its ignoreGlobs, so the language server
+  # and Biskit build the same view of the project. Set luau-lsp.ignoreGlobs under
+  # lsp.server_settings to override that and let the two differ.
+  #
+  # Patterns are matched against the project root wherever a walk starts, so
+  # "src/vendor/" still excludes that directory when list_dir is called on "src".
+  # Naming an excluded directory itself as relative_path lists it anyway: the
+  # exclusion filters what a walk descends into, not where a caller points it.
   # ignored_paths: []
 
   # Honour .gitignore and .git/info/exclude when walking the project.
+  #
+  # This is what usually hides Packages/ from find_file, list_dir, and
+  # search_for_pattern. It does not hide anything from the require graph or from
+  # resolve_instance_path: files the rojo sourcemap names are part of the game,
+  # so they are scanned whether or not this is on.
   # respect_gitignore: true
 
   # Run Biskit without the Luau language server. Nothing is downloaded, no
@@ -97,6 +124,18 @@ project:
   # to the agent. Memory, file, and search tools keep working. Useful for
   # non-Luau projects and for machines that cannot fetch the release asset.
   # memory_only: false
+
+  # Count the carpenter fork's shared("Name") string require as a dependency
+  # edge in get_require_graph and get_module_context. Sawhorse Roblox frameworks
+  # give the shared global a __call metamethod, which makes shared("Foo") a
+  # require of the module whose file is named Foo.luau.
+  #
+  # This governs Biskit's own scan only. The language server fork resolves
+  # shared() unconditionally and has no switch for it, so turning this off does
+  # not stop diagnostics, hover, or go to definition from following those calls.
+  # It only makes the require graph stop reporting them, which get_status will
+  # tell you about.
+  # shared_require: true
 
 tools:
   # Tool names to hide from the agent entirely.
@@ -109,12 +148,27 @@ tools:
   # refused with a message naming what to narrow, because half a JSON document
   # cannot be read; a text result, such as a memory, is cut and says so. Set to
   # 0 to lift the ceiling entirely.
-  # max_answer_chars: 150000
+  # max_answer_chars: 50000
 
   # max_listing_entries: 2000
+
+  # Cap on what search_for_pattern returns. In the default snippet mode this counts
+  # snippets; in "files" and "counts" mode it counts files, so a reported count is
+  # the file's real count rather than however much of the budget was left.
   # max_pattern_matches: 200
 
   # Cap on references returned by find_referencing_symbols. Kept separate from
   # max_listing_entries because a reference carries a source snippet and a name
   # path, where a listing entry is one path.
   # max_reference_matches: 200
+
+  # Keep symbol trees in .biskit/cache/ across sessions, keyed by each file's path,
+  # size, and modification time. A file that has not moved is answered from the
+  # index instead of costing another round trip to the language server, which is
+  # what a project-wide find_symbol pays once per candidate file. Turn it off to
+  # ask the language server every time.
+  # symbol_cache: true
+
+  # How many symbol trees the index holds before the ones nothing has reached for
+  # are dropped. Set to 0 to keep every file ever indexed.
+  # max_cached_symbol_files: 4000
