@@ -214,7 +214,8 @@ pub struct FileDiagnosticsRequest {
 pub struct SymbolDiagnosticsRequest {
     pub name_path: String,
     pub relative_path: String,
-    /// Also report diagnostics in every file that references this symbol.
+    /// Also report diagnostics in every file that references this symbol, the declaring file
+    /// included, each swept whole rather than clipped to the symbol.
     #[serde(default)]
     pub check_symbol_references: bool,
     /// 1 error, 2 warning, 3 information, 4 hint. Defaults to 2.
@@ -233,6 +234,21 @@ pub struct ExplainSymbolRequest {
     #[serde(default)]
     pub line: Option<u32>,
     /// 1-based column on that line. Defaults to 1.
+    #[serde(default)]
+    pub column: Option<u32>,
+    /// Include the doc comment alongside the type. Off by default because docs are long.
+    #[serde(default)]
+    pub include_documentation: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SignatureHelpRequest {
+    /// File containing the call, relative to the project root.
+    pub relative_path: String,
+    /// 1-based line of the call. A declaration is never inside a call's parentheses, so this
+    /// tool takes a position only, never a name path.
+    pub line: u32,
+    /// 1-based column on that line, inside the call's parentheses. Defaults to 1.
     #[serde(default)]
     pub column: Option<u32>,
     /// Include the doc comment alongside the type. Off by default because docs are long.

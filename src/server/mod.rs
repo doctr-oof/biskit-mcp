@@ -28,8 +28,8 @@ pub use crate::server::requests::{
     FindDeclarationRequest, FindFileRequest, FindSymbolRequestInput, InlayHintsRequest,
     ListDirRequest, MemoryNameRequest, ModuleContextRequest, NoArguments, RenameMemoryRequest,
     RequireGraphRequest, ResolveInstancePathRequest, RobloxApiRequest, SearchForPatternRequest,
-    SearchOutputMode, SymbolDiagnosticsRequest, SymbolLocationRequest, SymbolsOverviewRequest,
-    TypeDefinitionRequest,
+    SearchOutputMode, SignatureHelpRequest, SymbolDiagnosticsRequest, SymbolLocationRequest,
+    SymbolsOverviewRequest, TypeDefinitionRequest,
 };
 use crate::server::results::{OVERRUN_HINT, ToolResult, fail, truncate_at_char_boundary};
 use crate::{prompts, status};
@@ -541,10 +541,10 @@ impl Biskit {
     #[doc = descriptions::description!(get_signature_help)]
     async fn get_signature_help(
         &self,
-        Parameters(request): Parameters<ExplainSymbolRequest>,
+        Parameters(request): Parameters<SignatureHelpRequest>,
     ) -> ToolResult {
-        let point = SymbolPoint::parse(request.name_path.as_deref(), request.line, request.column)
-            .map_err(fail("get_signature_help"))?;
+        let point =
+            SymbolPoint::at(request.line, request.column).map_err(fail("get_signature_help"))?;
 
         let query = SymbolQuery::new(&self.inner.language_server);
         self.ok(

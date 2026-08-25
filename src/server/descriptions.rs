@@ -59,8 +59,8 @@ macro_rules! description {
          containing symbol."
     };
     (get_symbol_diagnostics) => {
-        "Gets diagnostics for one symbol and, optionally, for every file that references it. Use \
-         after editing a symbol."
+        "Gets diagnostics for one symbol and, optionally, for every file that references it, the \
+         declaring file included. Use after editing a symbol."
     };
     (explain_symbol) => {
         "Reports the type the language server infers for a symbol, not the type written in source. \
@@ -77,9 +77,10 @@ macro_rules! description {
     };
     (get_signature_help) => {
         "Reports a call's parameters without reading the callee. Aim line and column inside the \
-         call's parentheses; the result names which argument that position is. The label is the \
-         language server's own rendering of the call, so for a variadic callee such as print the \
-         parameter names come from the call site rather than the callee."
+         call's parentheses; the result names which argument that position is. There is no \
+         name_path here, because a declaration is never inside a call. The label is the language \
+         server's own rendering of the call, so for a variadic callee such as print the parameter \
+         names come from the call site rather than the callee."
     };
     (resolve_instance_path) => {
         "Maps between the Roblox DataModel and files on disk, either direction. Pass instance_path \

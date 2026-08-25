@@ -86,6 +86,17 @@ impl<'a> SymbolPoint<'a> {
             (None, None) => bail_hint!(POINT_HINT; "no position given"),
         }
     }
+
+    /// A position for the tools that take one and never accept a name path.
+    pub fn at(line: u32, column: Option<u32>) -> Result<Self> {
+        if line == 0 {
+            bail_hint!(LINE_HINT; "line is 1-based, so 0 names no line");
+        }
+        Ok(Self::LineColumn {
+            line,
+            column: column.unwrap_or(1).max(1),
+        })
+    }
 }
 
 struct ResolvedPoint {
@@ -448,5 +459,29 @@ mod tests {
         assert!(SymbolPoint::parse(None, Some(0), None).is_err());
         assert!(SymbolPoint::parse(None, None, Some(4)).is_err());
         assert!(SymbolPoint::parse(None, None, None).is_err());
+    }
+
+    #[test]
+    fn a_position_only_point_defaults_its_column_and_refuses_line_zero() {
+        assert!(matches!(
+            SymbolPoint::at(150, None).unwrap(),
+            SymbolPoint::LineColumn {
+                line: 150,
+                column: 1
+            }
+        ));
+        assert!(matches!(
+            SymbolPoint::at(150, Some(32)).unwrap(),
+            SymbolPoint::LineColumn {
+                line: 150,
+                column: 32
+            }
+        ));
+        assert!(matches!(
+            SymbolPoint::at(150, Some(0)).unwrap(),
+            SymbolPoint::LineColumn { column: 1, .. }
+        ));
+
+        assert!(SymbolPoint::at(0, Some(4)).is_err());
     }
 }

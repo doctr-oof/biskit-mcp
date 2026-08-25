@@ -254,7 +254,9 @@
 
     <Topic name="GetSignatureHelp">
         `get_signature_help` answers "what arguments does this take" without reading callee. Aim
-        `line`/`column` inside parentheses of call. Empty `signatures` carries `note`; usual cause is
+        `line`/`column` inside parentheses of call. Takes no `name_path`: declaration never sits
+        inside call's parentheses, so name path could never answer. Empty `signatures` carries
+        `note`; usual cause is
         position outside parentheses, but luau-lsp also answers with nothing at some positions
         genuinely inside call, among them receiver of `self:` method call. Note says so rather than
         asserting one cause.
@@ -385,7 +387,8 @@
     </Rule>
     <Rule>
         If edit changed symbol signature or behavior, call `get_symbol_diagnostics` with
-        `check_symbol_references: true` to catch breakage at call sites.
+        `check_symbol_references: true` to catch breakage at call sites. Every referencing file is
+        swept whole, declaring file included, so same-file call sites are reported too.
     </Rule>
 </Section>
 
