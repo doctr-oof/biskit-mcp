@@ -17,6 +17,7 @@ const GITIGNORE_CONTENTS: &str = "*\n";
 const FORMAT_VERSION: u32 = 1;
 
 const FLUSH_EVERY: usize = 64;
+const FLUSH_DIVISOR: usize = 8;
 
 /// Size and modification time of a source file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,7 +133,11 @@ impl SymbolCache {
             );
             state.pending += 1;
 
-            if state.pending < FLUSH_EVERY {
+            if self.capacity != 0 && state.entries.len() > self.capacity + FLUSH_EVERY {
+                evict(&mut state.entries, self.capacity);
+            }
+
+            if state.pending < flush_threshold(state.entries.len()) {
                 return;
             }
             self.snapshot(&mut state)
@@ -258,6 +263,12 @@ fn write_index(file: &Path, payload: &[u8]) -> Result<()> {
     std::fs::rename(&temporary, file)
         .with_context(|| format!("failed to replace {}", file.display()))?;
     Ok(())
+}
+
+/// How many puts may pile up before the index is written, scaled so a full index is not
+/// re-serialized every `FLUSH_EVERY` inserts.
+fn flush_threshold(entries: usize) -> usize {
+    FLUSH_EVERY.max(entries / FLUSH_DIVISOR)
 }
 
 fn evict(entries: &mut HashMap<String, Entry>, capacity: usize) {
@@ -478,6 +489,44 @@ mod tests {
 
         let gitignore = cache_dir(&fixture.project).join(".gitignore");
         assert_eq!(std::fs::read_to_string(gitignore).unwrap(), "*\n");
+    }
+
+    #[test]
+    fn the_flush_threshold_scales_with_the_index_but_never_drops_below_the_floor() {
+        assert_eq!(flush_threshold(0), FLUSH_EVERY);
+        assert_eq!(flush_threshold(FLUSH_EVERY * FLUSH_DIVISOR), FLUSH_EVERY);
+        assert_eq!(flush_threshold(4_000), 500);
+    }
+
+    #[test]
+    fn a_ceiling_wider_than_the_flush_floor_is_still_held_between_writes() {
+        let fixture = Fixture::build();
+        let stamp = fixture.stamp("Module.luau");
+        let capacity = 1_000;
+        let cache = SymbolCache::new(
+            &fixture.project,
+            &ToolSettings {
+                max_cached_symbol_files: capacity,
+                ..ToolSettings::default()
+            },
+        );
+
+        runtime().block_on(async {
+            assert!(
+                flush_threshold(capacity) > FLUSH_EVERY,
+                "the case under test needs a threshold above the floor"
+            );
+
+            for index in 0..capacity + flush_threshold(capacity) {
+                cache
+                    .put(&format!("Module{index}.luau"), stamp, &tree("update"))
+                    .await;
+                assert!(
+                    cache.entry_count().await <= capacity + FLUSH_EVERY,
+                    "the index ran past its ceiling at put {index}"
+                );
+            }
+        });
     }
 
     #[test]
