@@ -87,20 +87,22 @@ impl<'a> SymbolQuery<'a> {
         let session = self.handle.session().await?;
         let (path, symbol, position) = self.locate_one(&session, name_path, relative_path).await?;
 
-        let file = session.ensure_open(&path).await?;
-        let lines = LineIndex::new(&file.content);
-        let mut grouped = self
-            .file_diagnostics(
-                relative_path,
-                Some(lines.clamp_line(symbol.range.start.line as usize) as u32 + 1),
-                Some(lines.clamp_line(symbol.range.end.line as usize) as u32 + 1),
-                min_severity,
-            )
-            .await?;
-
         if !check_references {
-            return Ok(grouped);
+            let file = session.ensure_open(&path).await?;
+            let lines = LineIndex::new(&file.content);
+            return self
+                .file_diagnostics(
+                    relative_path,
+                    Some(lines.clamp_line(symbol.range.start.line as usize) as u32 + 1),
+                    Some(lines.clamp_line(symbol.range.end.line as usize) as u32 + 1),
+                    min_severity,
+                )
+                .await;
         }
+
+        let mut grouped = self
+            .file_diagnostics(relative_path, None, None, min_severity)
+            .await?;
 
         let locations = session.references(&path, position, false).await?;
         let mut visited = std::collections::HashSet::from([path]);
