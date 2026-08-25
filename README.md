@@ -230,6 +230,7 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `lsp.roblox_security_level` | `PluginSecurity` | Which Roblox API dump to load |
 | `lsp.sourcemap` | `sourcemap.json` | Rojo sourcemap path, or null to disable |
 | `lsp.server_settings` | empty | Raw luau-lsp settings in VS Code dotted-key form |
+| `lsp.max_open_documents` | `256` | Files kept open in the language server before the least recently used are closed, 0 for no ceiling |
 | `project.ignored_paths` | empty | Extra gitignore-style exclusions, matched against the project root on every walk and forwarded to luau-lsp |
 | `project.respect_gitignore` | `true` | Honour `.gitignore` when walking the project. Files the sourcemap names are scanned either way |
 | `project.memory_only` | `false` | Run without the language server, see below |

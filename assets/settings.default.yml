@@ -87,6 +87,13 @@ lsp:
   # How long to wait for diagnostics to settle after opening a file, in milliseconds.
   # diagnostics_settle_ms: 1500
 
+  # How many files may stay open in the language server at once. Every file a tool
+  # reaches for is opened there and stays in its working set, so an unbounded set
+  # makes every later request answer against more documents than the one before it.
+  # Once the ceiling is passed the least recently used files are closed again;
+  # reaching for one of them later reopens it. Set to 0 for no ceiling.
+  # max_open_documents: 256
+
 project:
   # Extra paths excluded from every walk: find_file, list_dir, search_for_pattern,
   # and the project scan that find_symbol runs when given no relative_path.
@@ -141,7 +148,7 @@ tools:
   # refused with a message naming what to narrow, because half a JSON document
   # cannot be read; a text result, such as a memory, is cut and says so. Set to
   # 0 to lift the ceiling entirely.
-  # max_answer_chars: 150000
+  # max_answer_chars: 50000
 
   # max_listing_entries: 2000
 

@@ -95,6 +95,8 @@ pub struct LspSettings {
     pub startup_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub diagnostics_settle_ms: u64,
+    /// Documents held open in the language server before the least recently used are closed.
+    pub max_open_documents: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -182,6 +184,7 @@ impl Default for LspSettings {
             startup_timeout_ms: 60_000,
             request_timeout_ms: 30_000,
             diagnostics_settle_ms: 1_500,
+            max_open_documents: 256,
         }
     }
 }
@@ -201,7 +204,7 @@ impl Default for ToolSettings {
     fn default() -> Self {
         Self {
             excluded: Vec::new(),
-            max_answer_chars: 150_000,
+            max_answer_chars: 50_000,
             max_listing_entries: 2_000,
             max_pattern_matches: 200,
             max_reference_matches: 200,

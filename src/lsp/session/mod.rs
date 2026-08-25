@@ -38,6 +38,14 @@ struct OpenDocument {
     content: Arc<str>,
     uri: Arc<str>,
     stamp: Option<FileStamp>,
+    touched: u64,
+}
+
+/// The documents the server has been told about, ordered by how recently each was reached for.
+#[derive(Default)]
+struct OpenDocuments {
+    clock: u64,
+    open: HashMap<PathBuf, OpenDocument>,
 }
 
 /// A document the language server has been told about, and the text it was told.
@@ -54,7 +62,8 @@ enum Sync {
 
 pub struct Session {
     connection: LspConnection,
-    documents: Mutex<HashMap<PathBuf, OpenDocument>>,
+    documents: Mutex<OpenDocuments>,
+    max_open_documents: usize,
     drain: JoinHandle<()>,
     sourcemap_watch: std::sync::Mutex<Option<JoinHandle<()>>>,
     alive: Arc<AtomicBool>,
@@ -91,7 +100,8 @@ impl Session {
 
         let session = Arc::new(Self {
             connection,
-            documents: Mutex::new(HashMap::new()),
+            documents: Mutex::new(OpenDocuments::default()),
+            max_open_documents: settings.lsp.max_open_documents,
             drain,
             sourcemap_watch: std::sync::Mutex::new(None),
             alive,
@@ -198,8 +208,14 @@ impl Session {
         let stamp = file_stamp(path).await;
 
         if stamp.is_some() {
-            let documents = self.documents.lock().await;
-            if let Some(open) = documents.get(path).filter(|open| open.stamp == stamp) {
+            let mut documents = self.documents.lock().await;
+            let touched = documents.tick();
+            if let Some(open) = documents
+                .open
+                .get_mut(path)
+                .filter(|open| open.stamp == stamp)
+            {
+                open.touched = touched;
                 return Ok(open.as_file());
             }
         }
@@ -211,15 +227,18 @@ impl Session {
 
         let (file, sync) = {
             let mut documents = self.documents.lock().await;
-            match documents.get_mut(path) {
+            let touched = documents.tick();
+            let synced = match documents.open.get_mut(path) {
                 Some(open) if open.content == content => {
                     open.stamp = stamp;
+                    open.touched = touched;
                     return Ok(open.as_file());
                 }
                 Some(open) => {
                     open.version += 1;
                     open.content = Arc::clone(&content);
                     open.stamp = stamp;
+                    open.touched = touched;
                     (open.as_file(), Sync::Changed(open.version))
                 }
                 None => {
@@ -228,12 +247,18 @@ impl Session {
                         content: Arc::clone(&content),
                         uri: Arc::from(uri::from_path(path)?),
                         stamp,
+                        touched,
                     };
                     let file = document.as_file();
-                    documents.insert(path.to_path_buf(), document);
+                    documents.open.insert(path.to_path_buf(), document);
                     (file, Sync::Opened)
                 }
+            };
+
+            if matches!(synced.1, Sync::Opened) {
+                self.close_least_recent(&mut documents, path).await;
             }
+            synced
         };
 
         let sent = match sync {
@@ -266,10 +291,49 @@ impl Session {
         };
 
         if let Err(error) = sent {
-            self.documents.lock().await.remove(path);
+            self.documents.lock().await.open.remove(path);
             return Err(error);
         }
         Ok(file)
+    }
+
+    /// Retracts the documents past the ceiling, newest kept, `keep` never chosen.
+    ///
+    /// The notification goes out under the guard so a later reopen of the same path cannot
+    /// have its `didOpen` overtaken by this `didClose`.
+    async fn close_least_recent(&self, documents: &mut OpenDocuments, keep: &Path) {
+        if self.max_open_documents == 0 || documents.open.len() <= self.max_open_documents {
+            return;
+        }
+
+        let excess = documents.open.len() - self.max_open_documents;
+        let mut ranked: Vec<(u64, PathBuf)> = documents
+            .open
+            .iter()
+            .filter(|(path, _)| path.as_path() != keep)
+            .map(|(path, open)| (open.touched, path.clone()))
+            .collect();
+        ranked.sort_unstable();
+
+        for (_, path) in ranked.into_iter().take(excess) {
+            let Some(open) = documents.open.remove(&path) else {
+                continue;
+            };
+            if let Err(error) = self
+                .connection
+                .notify(
+                    "textDocument/didClose",
+                    json!({"textDocument": {"uri": open.uri}}),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "biskit::lsp",
+                    "failed to close {}: {error}",
+                    path.display()
+                );
+            }
+        }
     }
 
     /// The symbol tree of `path`, alongside the text it was built from.
@@ -420,6 +484,13 @@ impl Session {
             watch.abort();
         }
         self.connection.shutdown().await;
+    }
+}
+
+impl OpenDocuments {
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
     }
 }
 
