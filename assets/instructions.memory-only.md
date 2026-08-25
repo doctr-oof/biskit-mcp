@@ -1,4 +1,4 @@
-# MCP Instructions (memory-only mode)
+# Biskit MCP Instructions (memory-only mode)
 
 <Main name="BiskitInstructionsManual">
 <Section name="WhatBiskitIs" desc="Identity and hard boundary. Read first.">

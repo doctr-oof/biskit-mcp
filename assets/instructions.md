@@ -1,4 +1,4 @@
-# MCP Instructions
+# Biskit MCP Instructions
 
 <Main name="BiskitInstructionsManual">
 <Section name="WhatBiskitIs" desc="Identity and hard boundary. Read first.">
