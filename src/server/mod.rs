@@ -1,20 +1,38 @@
+mod descriptions;
+mod requests;
+mod results;
+
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
-use serde::Deserialize;
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde::Serialize;
 
 use crate::config::Settings;
 use crate::errors;
 use crate::files::{FileTools, PatternSearchRequest};
-use crate::lsp::queries::{FindSymbolRequest, SymbolQuery, severity_from_input};
+use crate::lsp::queries::{
+    FindSymbolRequest, SymbolPoint, SymbolQuery, check_symbol_kinds, severity_from_input,
+};
 use crate::lsp::session::LanguageServerHandle;
 use crate::memory::MemoryStore;
 use crate::project::Project;
-use crate::prompts;
+use crate::roblox::RobloxIndex;
+use crate::roblox::api::ApiQuery;
+use crate::roblox::context;
+use crate::roblox::requires::{Direction, GraphRequest};
+pub use crate::server::requests::{
+    CreateMemoryRequest, EditMemoryRequest, ExplainSymbolRequest, FileDiagnosticsRequest,
+    FindDeclarationRequest, FindFileRequest, FindSymbolRequestInput, InlayHintsRequest,
+    ListDirRequest, MemoryNameRequest, ModuleContextRequest, NoArguments, RenameMemoryRequest,
+    RequireGraphRequest, ResolveInstancePathRequest, RobloxApiRequest, SearchForPatternRequest,
+    SearchOutputMode, SignatureHelpRequest, SymbolDiagnosticsRequest, SymbolLocationRequest,
+    SymbolsOverviewRequest, TypeDefinitionRequest,
+};
+use crate::server::results::{OVERRUN_HINT, ToolResult, fail, truncate_at_char_boundary};
+use crate::{prompts, status};
 
 #[derive(Clone)]
 pub struct Biskit {
@@ -27,42 +45,15 @@ struct Inner {
     memories: MemoryStore,
     files: FileTools,
     language_server: Arc<LanguageServerHandle>,
-}
-
-/// Tool failures travel back as `isError` results rather than JSON-RPC errors, so clients render
-/// the message itself instead of an `MCP error -32602:` envelope.
-type ToolResult = Result<CallToolResult, String>;
-
-fn fail(tool: &'static str) -> impl Fn(anyhow::Error) -> String {
-    move |error| errors::render(tool, &error)
-}
-
-const OVERRUN_HINT: &str = "ask for less: narrow relative_path, lower max_matches, drop \
-                            include_body, or raise tools.max_answer_chars in .biskit/settings.yml";
-
-/// Largest prefix of `value` that fits in `limit` bytes without splitting a character.
-fn truncate_at_char_boundary(value: &str, limit: usize) -> &str {
-    if value.len() <= limit {
-        return value;
-    }
-    let mut end = limit;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    &value[..end]
+    roblox: Arc<RobloxIndex>,
+    root_source: &'static str,
 }
 
 impl Biskit {
-    /// Ceiling on the size of one tool result, in bytes. Zero disables it.
     fn answer_limit(&self) -> usize {
         self.inner.settings.tools.max_answer_chars
     }
 
-    /// Results are serialised compactly: pretty printing costs the caller a newline and a growing
-    /// indent per field for no information gain.
-    ///
-    /// An oversized result is refused rather than truncated, because half a JSON document is not
-    /// readable at all, and the refusal names what to narrow.
     fn ok<T: Serialize>(&self, tool: &'static str, value: &T) -> ToolResult {
         let rendered = serde_json::to_string(value)
             .map_err(|error| format!("failed to serialise the tool result: {error}"))?;
@@ -81,8 +72,6 @@ impl Biskit {
         Ok(CallToolResult::success(vec![ContentBlock::text(rendered)]))
     }
 
-    /// Prose survives being cut in a way JSON does not, so an oversized text result is truncated
-    /// and says so rather than being refused outright.
     fn text(&self, value: impl Into<String>) -> ToolResult {
         let value = value.into();
         let limit = self.answer_limit();
@@ -101,181 +90,7 @@ impl Biskit {
     }
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MemoryNameRequest {
-    /// Memory name, without the .md extension. Nest with `/`.
-    pub memory_name: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CreateMemoryRequest {
-    /// Memory name, without the .md extension. Nest with `/`.
-    pub memory_name: String,
-    /// Markdown body. Reference other memories with `mem:name` in backticks.
-    pub content: String,
-    /// Replace a memory that already exists. Prefer edit_memory over a wholesale rewrite.
-    #[serde(default)]
-    pub overwrite: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct EditMemoryRequest {
-    pub memory_name: String,
-    /// Regular expression matched against the memory body.
-    pub pattern: String,
-    /// Replacement text. Capture groups are available as `$1`, `$2`, and `${name}`; write `$$` for
-    /// a literal dollar sign.
-    pub replacement: String,
-    /// Replace every match instead of erroring when the pattern is ambiguous.
-    #[serde(default)]
-    pub allow_multiple_occurrences: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RenameMemoryRequest {
-    pub old_name: String,
-    pub new_name: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListDirRequest {
-    /// Directory relative to the project root. Use "." for the root itself.
-    pub relative_path: String,
-    /// Descend into subdirectories.
-    pub recursive: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct FindFileRequest {
-    /// Filename glob, for example "*.luau" or "init.*".
-    pub file_mask: String,
-    /// Directory to search under, relative to the project root.
-    #[serde(default = "project_root")]
-    pub relative_path: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SearchForPatternRequest {
-    /// Regular expression matched against file contents.
-    pub substring_pattern: String,
-    #[serde(default)]
-    pub context_lines_before: usize,
-    #[serde(default)]
-    pub context_lines_after: usize,
-    /// Restrict to paths matching this glob, for example "src/**".
-    #[serde(default)]
-    pub paths_include_glob: Option<String>,
-    /// Skip paths matching this glob. Takes precedence over the include glob.
-    #[serde(default)]
-    pub paths_exclude_glob: Option<String>,
-    /// Directory or file to search under, relative to the project root.
-    #[serde(default = "project_root")]
-    pub relative_path: String,
-    /// Only search .luau, .lua, and .luaurc files.
-    #[serde(default)]
-    pub restrict_search_to_code_files: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SymbolsOverviewRequest {
-    /// Luau source file relative to the project root.
-    pub relative_path: String,
-    /// How many levels of nested symbols to include. 0 lists top-level symbols only. Defaults to
-    /// 1, which is where the members of a table live.
-    #[serde(default = "default_overview_depth")]
-    pub depth: u32,
-    /// Include each symbol's type signature. Off by default because signatures are long.
-    #[serde(default)]
-    pub include_detail: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct FindSymbolRequestInput {
-    /// Name path such as "update", "PlayerService/update", "PlayerService:update", or
-    /// "/PlayerService". Append "[n]" to a segment to pick one of several same-named symbols.
-    pub name_path: String,
-    /// File or directory to search. Omit to search the whole project.
-    #[serde(default)]
-    pub relative_path: Option<String>,
-    /// Levels of children to include alongside each match.
-    #[serde(default)]
-    pub depth: u32,
-    /// Include each matched symbol's source text.
-    #[serde(default)]
-    pub include_body: bool,
-    /// Include each symbol's type signature. Off by default because signatures are long.
-    #[serde(default)]
-    pub include_detail: bool,
-    /// LSP SymbolKind numbers to keep. Empty means all kinds.
-    #[serde(default)]
-    pub include_kinds: Vec<u32>,
-    /// LSP SymbolKind numbers to drop.
-    #[serde(default)]
-    pub exclude_kinds: Vec<u32>,
-    /// Match the final name path segment as a substring.
-    #[serde(default)]
-    pub substring_matching: bool,
-    /// Cap on returned matches.
-    #[serde(default = "default_max_matches")]
-    pub max_matches: usize,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SymbolLocationRequest {
-    /// Name path of the symbol. Append "[n]" to a segment to pick one of several same-named symbols.
-    pub name_path: String,
-    /// File containing the symbol, relative to the project root.
-    pub relative_path: String,
-    /// Source lines to show either side of each reference. 0 shows the reference line alone.
-    #[serde(default)]
-    pub context_lines: usize,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct FindDeclarationRequest {
-    /// Name path of the symbol. Append "[n]" to a segment to pick one of several same-named symbols.
-    pub name_path: String,
-    /// File containing the symbol, relative to the project root.
-    pub relative_path: String,
-    /// Include a source snippet around each result.
-    #[serde(default)]
-    pub include_body: bool,
-    /// Include each symbol's type signature. Off by default because signatures are long.
-    #[serde(default)]
-    pub include_detail: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct FileDiagnosticsRequest {
-    pub relative_path: String,
-    /// First line to report on, 1-based.
-    #[serde(default)]
-    pub start_line: Option<u32>,
-    /// Last line to report on, 1-based.
-    #[serde(default)]
-    pub end_line: Option<u32>,
-    /// 1 error, 2 warning, 3 information, 4 hint. Defaults to 2.
-    #[serde(default)]
-    pub min_severity: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SymbolDiagnosticsRequest {
-    pub name_path: String,
-    pub relative_path: String,
-    /// Also report diagnostics in every file that references this symbol.
-    #[serde(default)]
-    pub check_symbol_references: bool,
-    /// 1 error, 2 warning, 3 information, 4 hint. Defaults to 2.
-    #[serde(default)]
-    pub min_severity: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct NoArguments {}
-
-/// Tools backed by the language server. Memory-only mode drops these routes entirely.
-const LANGUAGE_SERVER_TOOLS: [&str; 7] = [
+const LANGUAGE_SERVER_TOOLS: [&str; 15] = [
     "get_symbols_overview",
     "find_symbol",
     "find_declaration",
@@ -283,25 +98,22 @@ const LANGUAGE_SERVER_TOOLS: [&str; 7] = [
     "get_file_diagnostics",
     "get_symbol_diagnostics",
     "restart_language_server",
+    "explain_symbol",
+    "get_type_definition",
+    "get_inlay_hints",
+    "get_signature_help",
+    "resolve_instance_path",
+    "get_require_graph",
+    "get_module_context",
+    "query_roblox_api",
 ];
-
-fn project_root() -> String {
-    ".".to_string()
-}
-
-fn default_max_matches() -> usize {
-    50
-}
-
-fn default_overview_depth() -> u32 {
-    1
-}
 
 #[tool_router]
 impl Biskit {
-    pub fn new(project: Project, settings: Settings) -> Self {
+    pub fn new(project: Project, settings: Settings, root_source: &'static str) -> Self {
         let memories = MemoryStore::new(project.clone());
         let files = FileTools::new(project.clone(), settings.clone());
+        let roblox = Arc::new(RobloxIndex::new(project.clone(), settings.clone()));
         let language_server = Arc::new(LanguageServerHandle::new(project, settings.clone()));
 
         let memory_only = settings.project.memory_only;
@@ -334,6 +146,8 @@ impl Biskit {
                 memories,
                 files,
                 language_server,
+                roblox,
+                root_source,
             }),
             tool_router,
         }
@@ -349,9 +163,8 @@ impl Biskit {
         self.inner.language_server.stop().await;
     }
 
-    #[tool(
-        description = "Returns Biskit's usage manual and the index of memories stored for this project. Call this before using any other Biskit tool."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(initial_instructions)]
     async fn initial_instructions(
         &self,
         Parameters(NoArguments {}): Parameters<NoArguments>,
@@ -367,7 +180,8 @@ impl Biskit {
         ))
     }
 
-    #[tool(description = "Lists the names of every memory stored for this project.")]
+    #[tool]
+    #[doc = descriptions::description!(list_memories)]
     async fn list_memories(
         &self,
         Parameters(NoArguments {}): Parameters<NoArguments>,
@@ -378,7 +192,8 @@ impl Biskit {
         )
     }
 
-    #[tool(description = "Reads the full markdown content of one memory.")]
+    #[tool]
+    #[doc = descriptions::description!(read_memory)]
     async fn read_memory(&self, Parameters(request): Parameters<MemoryNameRequest>) -> ToolResult {
         self.text(
             self.inner
@@ -388,9 +203,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Writes a memory recording durable knowledge about this project, in markdown. Use a meaningful, nestable name. Errors if the name is taken unless overwrite is set."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(create_memory)]
     async fn create_memory(
         &self,
         Parameters(request): Parameters<CreateMemoryRequest>,
@@ -408,7 +222,8 @@ impl Biskit {
         self.text(format!("{verb} memory {}.", outcome.memory))
     }
 
-    #[tool(description = "Deletes a memory.")]
+    #[tool]
+    #[doc = descriptions::description!(delete_memory)]
     async fn delete_memory(
         &self,
         Parameters(request): Parameters<MemoryNameRequest>,
@@ -421,9 +236,8 @@ impl Biskit {
         self.text(format!("Deleted memory {name}."))
     }
 
-    #[tool(
-        description = "Replaces content matching a regular expression inside an existing memory. Prefer this over rewriting a memory wholesale."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(edit_memory)]
     async fn edit_memory(&self, Parameters(request): Parameters<EditMemoryRequest>) -> ToolResult {
         let outcome = self
             .inner
@@ -441,9 +255,8 @@ impl Biskit {
         ))
     }
 
-    #[tool(
-        description = "Renames or moves a memory, rewriting every `mem:` reference to it in other memories."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(rename_memory)]
     async fn rename_memory(
         &self,
         Parameters(request): Parameters<RenameMemoryRequest>,
@@ -463,7 +276,8 @@ impl Biskit {
         )
     }
 
-    #[tool(description = "Lists files and directories under a project-relative path.")]
+    #[tool]
+    #[doc = descriptions::description!(list_dir)]
     async fn list_dir(&self, Parameters(request): Parameters<ListDirRequest>) -> ToolResult {
         self.ok(
             "list_dir",
@@ -475,7 +289,8 @@ impl Biskit {
         )
     }
 
-    #[tool(description = "Finds files whose name matches a glob mask.")]
+    #[tool]
+    #[doc = descriptions::description!(find_file)]
     async fn find_file(&self, Parameters(request): Parameters<FindFileRequest>) -> ToolResult {
         self.ok(
             "find_file",
@@ -487,9 +302,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Searches file contents with a regular expression. Use this for text that is not a symbol; use find_symbol for definitions."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(search_for_pattern)]
     async fn search_for_pattern(
         &self,
         Parameters(request): Parameters<SearchForPatternRequest>,
@@ -506,14 +320,16 @@ impl Biskit {
                 paths_exclude_glob: request.paths_exclude_glob.as_deref(),
                 restrict_to_code_files: request.restrict_search_to_code_files,
                 max_matches: self.inner.settings.tools.max_pattern_matches,
+                mode: request.mode.as_mode(),
+                case_insensitive: request.case_insensitive,
+                dot_matches_newline: request.dot_matches_newline,
             })
             .map_err(fail("search_for_pattern"))?;
         self.ok("search_for_pattern", &result)
     }
 
-    #[tool(
-        description = "Lists the symbols defined in a Luau file. Use this before reading a file to decide what is worth reading."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_symbols_overview)]
     async fn get_symbols_overview(
         &self,
         Parameters(request): Parameters<SymbolsOverviewRequest>,
@@ -526,19 +342,23 @@ impl Biskit {
                     &request.relative_path,
                     request.depth,
                     request.include_detail,
+                    request.include_locals,
                 )
                 .await
                 .map_err(fail("get_symbols_overview"))?,
         )
     }
 
-    #[tool(
-        description = "Finds symbols by name path across the project or within one file or directory."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(find_symbol)]
     async fn find_symbol(
         &self,
         Parameters(request): Parameters<FindSymbolRequestInput>,
     ) -> ToolResult {
+        check_symbol_kinds("include_kinds", &request.include_kinds)
+            .and_then(|()| check_symbol_kinds("exclude_kinds", &request.exclude_kinds))
+            .map_err(fail("find_symbol"))?;
+
         let query = SymbolQuery::new(&self.inner.language_server);
         self.ok(
             "find_symbol",
@@ -549,6 +369,7 @@ impl Biskit {
                     depth: request.depth,
                     include_body: request.include_body,
                     include_detail: request.include_detail,
+                    include_locals: request.include_locals,
                     include_kinds: request.include_kinds,
                     exclude_kinds: request.exclude_kinds,
                     substring_matching: request.substring_matching,
@@ -561,17 +382,21 @@ impl Biskit {
         )
     }
 
-    #[tool(description = "Finds where a symbol is declared.")]
+    #[tool]
+    #[doc = descriptions::description!(find_declaration)]
     async fn find_declaration(
         &self,
         Parameters(request): Parameters<FindDeclarationRequest>,
     ) -> ToolResult {
+        let point = SymbolPoint::parse(request.name_path.as_deref(), request.line, request.column)
+            .map_err(fail("find_declaration"))?;
+
         let query = SymbolQuery::new(&self.inner.language_server);
         self.ok(
             "find_declaration",
             &query
                 .find_declaration(
-                    &request.name_path,
+                    point,
                     &request.relative_path,
                     request.include_body,
                     request.include_detail,
@@ -581,7 +406,8 @@ impl Biskit {
         )
     }
 
-    #[tool(description = "Finds every symbol that references the given symbol.")]
+    #[tool]
+    #[doc = descriptions::description!(find_referencing_symbols)]
     async fn find_referencing_symbols(
         &self,
         Parameters(request): Parameters<SymbolLocationRequest>,
@@ -601,9 +427,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Gets diagnostics for a file, optionally limited to a line range, grouped by severity and containing symbol."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_file_diagnostics)]
     async fn get_file_diagnostics(
         &self,
         Parameters(request): Parameters<FileDiagnosticsRequest>,
@@ -625,9 +450,8 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Gets diagnostics for one symbol and, optionally, for every file that references it. Use after editing a symbol."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(get_symbol_diagnostics)]
     async fn get_symbol_diagnostics(
         &self,
         Parameters(request): Parameters<SymbolDiagnosticsRequest>,
@@ -649,9 +473,218 @@ impl Biskit {
         )
     }
 
-    #[tool(
-        description = "Restarts the Luau language server. Use when symbol results look stale or empty for a file you know has symbols."
-    )]
+    #[tool]
+    #[doc = descriptions::description!(explain_symbol)]
+    async fn explain_symbol(
+        &self,
+        Parameters(request): Parameters<ExplainSymbolRequest>,
+    ) -> ToolResult {
+        let point = SymbolPoint::parse(request.name_path.as_deref(), request.line, request.column)
+            .map_err(fail("explain_symbol"))?;
+
+        let query = SymbolQuery::new(&self.inner.language_server);
+        self.ok(
+            "explain_symbol",
+            &query
+                .explain_symbol(point, &request.relative_path, request.include_documentation)
+                .await
+                .map_err(fail("explain_symbol"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(get_type_definition)]
+    async fn get_type_definition(
+        &self,
+        Parameters(request): Parameters<TypeDefinitionRequest>,
+    ) -> ToolResult {
+        let point = SymbolPoint::parse(request.name_path.as_deref(), request.line, request.column)
+            .map_err(fail("get_type_definition"))?;
+
+        let query = SymbolQuery::new(&self.inner.language_server);
+        self.ok(
+            "get_type_definition",
+            &query
+                .type_definition(
+                    point,
+                    &request.relative_path,
+                    request.include_body,
+                    request.include_detail,
+                )
+                .await
+                .map_err(fail("get_type_definition"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(get_inlay_hints)]
+    async fn get_inlay_hints(
+        &self,
+        Parameters(request): Parameters<InlayHintsRequest>,
+    ) -> ToolResult {
+        let query = SymbolQuery::new(&self.inner.language_server);
+        self.ok(
+            "get_inlay_hints",
+            &query
+                .inlay_hints(
+                    &request.relative_path,
+                    request.start_line,
+                    request.end_line,
+                    self.inner.settings.tools.max_listing_entries,
+                )
+                .await
+                .map_err(fail("get_inlay_hints"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(get_signature_help)]
+    async fn get_signature_help(
+        &self,
+        Parameters(request): Parameters<SignatureHelpRequest>,
+    ) -> ToolResult {
+        let point =
+            SymbolPoint::at(request.line, request.column).map_err(fail("get_signature_help"))?;
+
+        let query = SymbolQuery::new(&self.inner.language_server);
+        self.ok(
+            "get_signature_help",
+            &query
+                .signature_help(point, &request.relative_path, request.include_documentation)
+                .await
+                .map_err(fail("get_signature_help"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(resolve_instance_path)]
+    async fn resolve_instance_path(
+        &self,
+        Parameters(request): Parameters<ResolveInstancePathRequest>,
+    ) -> ToolResult {
+        let sourcemap = self
+            .inner
+            .roblox
+            .sourcemap()
+            .await
+            .map_err(fail("resolve_instance_path"))?;
+        let newest = self.inner.roblox.newest_source().await;
+        self.ok(
+            "resolve_instance_path",
+            &sourcemap
+                .resolve(
+                    request.instance_path.as_deref(),
+                    request.relative_path.as_deref(),
+                    newest.map(|(_, modified)| modified),
+                )
+                .map_err(fail("resolve_instance_path"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(get_require_graph)]
+    async fn get_require_graph(
+        &self,
+        Parameters(request): Parameters<RequireGraphRequest>,
+    ) -> ToolResult {
+        let directions =
+            Direction::parse(request.direction.as_deref()).map_err(fail("get_require_graph"))?;
+        let sourcemap = self
+            .inner
+            .roblox
+            .sourcemap()
+            .await
+            .map_err(fail("get_require_graph"))?;
+        let graph = self
+            .inner
+            .roblox
+            .require_graph()
+            .await
+            .map_err(fail("get_require_graph"))?;
+
+        self.ok(
+            "get_require_graph",
+            &graph
+                .answer(
+                    GraphRequest {
+                        relative_path: request.relative_path.as_deref(),
+                        directions,
+                        depth: request.depth,
+                        include_cycles: request
+                            .include_cycles
+                            .unwrap_or(request.relative_path.is_none()),
+                        include_unresolved: request.include_unresolved,
+                        limit: self.inner.settings.tools.max_listing_entries,
+                    },
+                    &sourcemap,
+                )
+                .map_err(fail("get_require_graph"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(get_module_context)]
+    async fn get_module_context(
+        &self,
+        Parameters(request): Parameters<ModuleContextRequest>,
+    ) -> ToolResult {
+        self.ok(
+            "get_module_context",
+            &context::module_context(
+                &self.inner.roblox,
+                &self.inner.language_server,
+                &request.relative_path,
+                self.inner.settings.tools.max_listing_entries,
+            )
+            .await
+            .map_err(fail("get_module_context"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(query_roblox_api)]
+    async fn query_roblox_api(
+        &self,
+        Parameters(request): Parameters<RobloxApiRequest>,
+    ) -> ToolResult {
+        let api = self
+            .inner
+            .roblox
+            .api()
+            .await
+            .map_err(fail("query_roblox_api"))?;
+        self.ok(
+            "query_roblox_api",
+            &api.answer(ApiQuery {
+                query: &request.query,
+                member_filter: request.member_filter.as_deref(),
+                include_inherited: request.include_inherited,
+                include_documentation: request.include_documentation,
+                max_members: request
+                    .max_members
+                    .min(self.inner.settings.tools.max_listing_entries),
+            })
+            .map_err(fail("query_roblox_api"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(get_status)]
+    async fn get_status(&self, Parameters(NoArguments {}): Parameters<NoArguments>) -> ToolResult {
+        let status = status::collect(
+            &self.inner.language_server,
+            &self.inner.roblox,
+            &self.inner.settings,
+            &self.inner.memories,
+            self.inner.root_source,
+        )
+        .await
+        .map_err(fail("get_status"))?;
+        self.ok("get_status", &status)
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(restart_language_server)]
     async fn restart_language_server(
         &self,
         Parameters(NoArguments {}): Parameters<NoArguments>,
@@ -696,7 +729,7 @@ mod tests {
             tools,
             ..Default::default()
         };
-        (dir, Biskit::new(project, settings))
+        (dir, Biskit::new(project, settings, "test"))
     }
 
     fn rendered(result: &CallToolResult) -> String {
@@ -733,7 +766,6 @@ mod tests {
         );
 
         let answer = rendered(&biskit.text("mémoire trop longue").unwrap());
-        // The cap falls inside the multi-byte "é", so the cut lands on the boundary below it.
         assert!(answer.starts_with("mémoire"));
         assert!(answer.contains("[truncated: 8 of 20 characters shown"));
     }
@@ -774,5 +806,46 @@ mod tests {
         ] {
             assert!(biskit.tool_router.has_route(name), "missing {name}");
         }
+    }
+
+    #[test]
+    fn get_status_is_routed_in_both_modes() {
+        for memory_only in [false, true] {
+            let (_dir, biskit) = open(memory_only);
+            assert!(
+                biskit.tool_router.has_route("get_status"),
+                "missing in memory_only={memory_only}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_status_report_names_the_root_and_the_mode() {
+        let (dir, biskit) = open(true);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let rendered = rendered(
+            &runtime
+                .block_on(biskit.get_status(Parameters(NoArguments {})))
+                .unwrap(),
+        );
+
+        let status: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(status["mode"], "memory-only");
+        assert_eq!(status["root_source"], "test");
+        assert_eq!(status["language_server"]["state"], "disabled");
+        assert_eq!(status["memories"]["count"], 0);
+        assert!(
+            status.get("sourcemap").is_none(),
+            "memory-only mode loads no sourcemap, so it has none to report on"
+        );
+        assert!(
+            status["project_root"]
+                .as_str()
+                .unwrap()
+                .ends_with(dir.path().file_name().unwrap().to_str().unwrap())
+        );
     }
 }

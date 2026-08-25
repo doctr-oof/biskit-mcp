@@ -1,32 +1,32 @@
+mod handle;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::time::{Duration, sleep};
 
 use super::acquire::{self, LanguageServerInstall};
 use super::client::{LspConnection, ServerEvent};
 use super::protocol::{
-    Diagnostic, DocumentDiagnosticReport, DocumentSymbolResponse, GotoResponse, Location, Position,
+    Diagnostic, DocumentDiagnosticReport, DocumentSymbolResponse, GotoResponse, Hover, InlayHint,
+    Location, Position, Range, SignatureHelp,
 };
 use super::symbols::{SymbolNode, build_tree};
 use super::uri;
-use crate::bail_hint;
 use crate::config::Settings;
 use crate::project::Project;
+
+pub use handle::{LanguageServerHandle, ServerState, ensure_luau_file};
 
 const LUAU_LANGUAGE_ID: &str = "luau";
 const SOURCEMAP_POLL_INTERVAL: Duration = Duration::from_millis(1_500);
 
-/// Size and modification time of a file as of the last time it was read.
-///
-/// Comparing this against the file on disk decides whether the body has to be read at all. Within
-/// one agent session the same files are visited over and over and almost never change between
-/// visits, so the read that used to happen on every call is the read worth avoiding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileStamp {
     modified: std::time::SystemTime,
@@ -36,10 +36,16 @@ struct FileStamp {
 struct OpenDocument {
     version: i64,
     content: Arc<str>,
-    /// Encoded once per document rather than per request against it.
     uri: Arc<str>,
-    /// Absent when the platform did not report a modification time, which forces the full read.
     stamp: Option<FileStamp>,
+    touched: u64,
+}
+
+/// The documents the server has been told about, ordered by how recently each was reached for.
+#[derive(Default)]
+struct OpenDocuments {
+    clock: u64,
+    open: HashMap<PathBuf, OpenDocument>,
 }
 
 /// A document the language server has been told about, and the text it was told.
@@ -49,7 +55,6 @@ pub struct OpenFile {
     pub uri: Arc<str>,
 }
 
-/// What has to be sent to the server after the document map has been updated.
 enum Sync {
     Opened,
     Changed(i64),
@@ -57,9 +62,11 @@ enum Sync {
 
 pub struct Session {
     connection: LspConnection,
-    documents: Mutex<HashMap<PathBuf, OpenDocument>>,
+    documents: Mutex<OpenDocuments>,
+    max_open_documents: usize,
     drain: JoinHandle<()>,
     sourcemap_watch: std::sync::Mutex<Option<JoinHandle<()>>>,
+    alive: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -70,7 +77,7 @@ impl Session {
             .context("language server acquisition panicked")??;
 
         let (events, receiver) = mpsc::unbounded_channel();
-        let configuration = settings.lsp.workspace_configuration();
+        let configuration = settings.lsp.workspace_configuration(&settings.project);
         let request_timeout = Duration::from_millis(settings.lsp.request_timeout_ms);
 
         let connection = LspConnection::spawn(
@@ -84,20 +91,26 @@ impl Session {
         .await?;
 
         let ready = Arc::new(tokio::sync::Notify::new());
-        let drain = tokio::spawn(drain_events(receiver, Arc::clone(&ready)));
+        let alive = Arc::new(AtomicBool::new(true));
+        let drain = tokio::spawn(drain_events(
+            receiver,
+            Arc::clone(&ready),
+            Arc::clone(&alive),
+        ));
 
         let session = Arc::new(Self {
             connection,
-            documents: Mutex::new(HashMap::new()),
+            documents: Mutex::new(OpenDocuments::default()),
+            max_open_documents: settings.lsp.max_open_documents,
             drain,
             sourcemap_watch: std::sync::Mutex::new(None),
+            alive,
         });
 
         session
             .initialize(project, &configuration, settings)
             .await?;
 
-        // The watcher holds a weak reference so it never keeps a dead session alive.
         let watcher = spawn_sourcemap_watch(project, settings, Arc::downgrade(&session));
         *session
             .sourcemap_watch
@@ -134,6 +147,7 @@ impl Session {
                 "workspace": {
                     "configuration": true,
                     "workspaceFolders": true,
+                    "workspaceEdit": {"documentChanges": true, "failureHandling": "abort"},
                     "didChangeConfiguration": {"dynamicRegistration": true},
                     "didChangeWatchedFiles": {"dynamicRegistration": true},
                     "symbol": {"dynamicRegistration": false},
@@ -149,7 +163,22 @@ impl Session {
                         "hierarchicalDocumentSymbolSupport": true,
                     },
                     "definition": {"dynamicRegistration": false, "linkSupport": true},
+                    "typeDefinition": {"dynamicRegistration": false, "linkSupport": true},
                     "references": {"dynamicRegistration": false},
+                    "hover": {
+                        "dynamicRegistration": false,
+                        "contentFormat": ["markdown", "plaintext"],
+                    },
+                    "inlayHint": {"dynamicRegistration": false},
+                    "signatureHelp": {
+                        "dynamicRegistration": false,
+                        "contextSupport": false,
+                        "signatureInformation": {
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "parameterInformation": {"labelOffsetSupport": true},
+                            "activeParameterSupport": true,
+                        },
+                    },
                     "publishDiagnostics": {"relatedInformation": true},
                     "diagnostic": {
                         "dynamicRegistration": false,
@@ -175,16 +204,18 @@ impl Session {
     }
 
     /// Makes sure the server holds the current text of `path`, and hands back that text.
-    ///
-    /// The body is only read from disk when the file's size or modification time differs from the
-    /// stamp taken the last time it was read. The notification is written after the document map
-    /// lock is released, so nothing waits on the stdin mutex while holding it.
     pub async fn ensure_open(&self, path: &Path) -> Result<OpenFile> {
         let stamp = file_stamp(path).await;
 
         if stamp.is_some() {
-            let documents = self.documents.lock().await;
-            if let Some(open) = documents.get(path).filter(|open| open.stamp == stamp) {
+            let mut documents = self.documents.lock().await;
+            let touched = documents.tick();
+            if let Some(open) = documents
+                .open
+                .get_mut(path)
+                .filter(|open| open.stamp == stamp)
+            {
+                open.touched = touched;
                 return Ok(open.as_file());
             }
         }
@@ -196,16 +227,18 @@ impl Session {
 
         let (file, sync) = {
             let mut documents = self.documents.lock().await;
-            match documents.get_mut(path) {
-                // A stamp that moved without the bytes moving still means nothing to send.
+            let touched = documents.tick();
+            let synced = match documents.open.get_mut(path) {
                 Some(open) if open.content == content => {
                     open.stamp = stamp;
+                    open.touched = touched;
                     return Ok(open.as_file());
                 }
                 Some(open) => {
                     open.version += 1;
                     open.content = Arc::clone(&content);
                     open.stamp = stamp;
+                    open.touched = touched;
                     (open.as_file(), Sync::Changed(open.version))
                 }
                 None => {
@@ -214,12 +247,18 @@ impl Session {
                         content: Arc::clone(&content),
                         uri: Arc::from(uri::from_path(path)?),
                         stamp,
+                        touched,
                     };
                     let file = document.as_file();
-                    documents.insert(path.to_path_buf(), document);
+                    documents.open.insert(path.to_path_buf(), document);
                     (file, Sync::Opened)
                 }
+            };
+
+            if matches!(synced.1, Sync::Opened) {
+                self.close_least_recent(&mut documents, path).await;
             }
+            synced
         };
 
         let sent = match sync {
@@ -251,18 +290,53 @@ impl Session {
             }
         };
 
-        // A document the server was never told about must not stay in the map claiming otherwise.
         if let Err(error) = sent {
-            self.documents.lock().await.remove(path);
+            self.documents.lock().await.open.remove(path);
             return Err(error);
         }
         Ok(file)
     }
 
-    /// The symbol tree of `path`, alongside the text it was built from.
+    /// Retracts the documents past the ceiling, newest kept, `keep` never chosen.
     ///
-    /// The text comes back because `ensure_open` has already produced it: every caller needs both,
-    /// and asking for them separately read the same file from disk twice.
+    /// The notification goes out under the guard so a later reopen of the same path cannot
+    /// have its `didOpen` overtaken by this `didClose`.
+    async fn close_least_recent(&self, documents: &mut OpenDocuments, keep: &Path) {
+        if self.max_open_documents == 0 || documents.open.len() <= self.max_open_documents {
+            return;
+        }
+
+        let excess = documents.open.len() - self.max_open_documents;
+        let mut ranked: Vec<(u64, PathBuf)> = documents
+            .open
+            .iter()
+            .filter(|(path, _)| path.as_path() != keep)
+            .map(|(path, open)| (open.touched, path.clone()))
+            .collect();
+        ranked.sort_unstable();
+
+        for (_, path) in ranked.into_iter().take(excess) {
+            let Some(open) = documents.open.remove(&path) else {
+                continue;
+            };
+            if let Err(error) = self
+                .connection
+                .notify(
+                    "textDocument/didClose",
+                    json!({"textDocument": {"uri": open.uri}}),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "biskit::lsp",
+                    "failed to close {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// The symbol tree of `path`, alongside the text it was built from.
     pub async fn document_symbols(&self, path: &Path) -> Result<(Vec<SymbolNode>, Arc<str>)> {
         let file = self.ensure_open(path).await?;
         let response: Option<DocumentSymbolResponse> = self
@@ -290,6 +364,68 @@ impl Session {
         Ok(response
             .map(GotoResponse::into_locations)
             .unwrap_or_default())
+    }
+
+    pub async fn type_definition(&self, path: &Path, position: Position) -> Result<Vec<Location>> {
+        let file = self.ensure_open(path).await?;
+        let response: Option<GotoResponse> = self
+            .connection
+            .request(
+                "textDocument/typeDefinition",
+                json!({
+                    "textDocument": {"uri": file.uri},
+                    "position": position,
+                }),
+            )
+            .await?;
+        Ok(response
+            .map(GotoResponse::into_locations)
+            .unwrap_or_default())
+    }
+
+    pub async fn hover(&self, path: &Path, position: Position) -> Result<Option<Hover>> {
+        let file = self.ensure_open(path).await?;
+        self.connection
+            .request(
+                "textDocument/hover",
+                json!({
+                    "textDocument": {"uri": file.uri},
+                    "position": position,
+                }),
+            )
+            .await
+    }
+
+    pub async fn signature_help(
+        &self,
+        path: &Path,
+        position: Position,
+    ) -> Result<Option<SignatureHelp>> {
+        let file = self.ensure_open(path).await?;
+        self.connection
+            .request(
+                "textDocument/signatureHelp",
+                json!({
+                    "textDocument": {"uri": file.uri},
+                    "position": position,
+                }),
+            )
+            .await
+    }
+
+    pub async fn inlay_hints(&self, path: &Path, range: Range) -> Result<Vec<InlayHint>> {
+        let file = self.ensure_open(path).await?;
+        let response: Option<Vec<InlayHint>> = self
+            .connection
+            .request(
+                "textDocument/inlayHint",
+                json!({
+                    "textDocument": {"uri": file.uri},
+                    "range": range,
+                }),
+            )
+            .await?;
+        Ok(response.unwrap_or_default())
     }
 
     pub async fn references(
@@ -334,7 +470,13 @@ impl Session {
             .await
     }
 
+    /// False once the child process has gone, so a caller can replace the session rather than wait on it.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
+
     pub async fn shutdown(&self) {
+        self.alive.store(false, Ordering::Release);
         self.drain.abort();
         if let Ok(mut guard) = self.sourcemap_watch.lock()
             && let Some(watch) = guard.take()
@@ -342,6 +484,13 @@ impl Session {
             watch.abort();
         }
         self.connection.shutdown().await;
+    }
+}
+
+impl OpenDocuments {
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
     }
 }
 
@@ -401,6 +550,7 @@ fn build_arguments(
 async fn drain_events(
     mut receiver: mpsc::UnboundedReceiver<ServerEvent>,
     ready: Arc<tokio::sync::Notify>,
+    alive: Arc<AtomicBool>,
 ) {
     while let Some(event) = receiver.recv().await {
         match event {
@@ -411,14 +561,15 @@ async fn drain_events(
                 tracing::debug!(target: "biskit::lsp", "{message}");
             }
             ServerEvent::Exited => {
+                alive.store(false, Ordering::Release);
                 tracing::warn!(target: "biskit::lsp", "language server exited");
                 return;
             }
         }
     }
+    alive.store(false, Ordering::Release);
 }
 
-/// luau-lsp only reloads the sourcemap when told; poll its mtime and forward changes.
 fn spawn_sourcemap_watch(
     project: &Project,
     settings: &Settings,
@@ -429,6 +580,10 @@ fn spawn_sourcemap_watch(
     }
     let relative = settings.lsp.sourcemap.as_ref()?;
     let sourcemap = project.resolve(relative).ok()?;
+    if let Err(error) = uri::from_path(&sourcemap) {
+        tracing::warn!(target: "biskit::lsp", "sourcemap cannot be watched: {error}");
+        return None;
+    }
 
     Some(tokio::spawn(async move {
         let mut last_seen = modified_at(&sourcemap).await;
@@ -441,11 +596,11 @@ fn spawn_sourcemap_watch(
             if current == last_seen {
                 continue;
             }
-            last_seen = current;
             if let Err(error) = session.notify_sourcemap_changed(&sourcemap).await {
                 tracing::warn!(target: "biskit::lsp", "sourcemap notification failed: {error}");
-                return;
+                continue;
             }
+            last_seen = current;
             tracing::debug!(target: "biskit::lsp", "sourcemap change forwarded");
         }
     }))
@@ -454,241 +609,4 @@ fn spawn_sourcemap_watch(
 async fn modified_at(path: &Path) -> Option<(std::time::SystemTime, u64)> {
     let metadata = tokio::fs::metadata(path).await.ok()?;
     Some((metadata.modified().ok()?, metadata.len()))
-}
-
-/// Wraps the session so it can be restarted without tearing down the MCP server.
-pub struct LanguageServerHandle {
-    project: Project,
-    settings: Settings,
-    session: Mutex<Option<Arc<Session>>>,
-}
-
-impl LanguageServerHandle {
-    pub fn new(project: Project, settings: Settings) -> Self {
-        Self {
-            project,
-            settings,
-            session: Mutex::new(None),
-        }
-    }
-
-    pub async fn session(&self) -> Result<Arc<Session>> {
-        if self.settings.project.memory_only {
-            bail_hint!(
-                "set project.memory_only to false in .biskit/settings.yml and restart the server, \
-                 or use search_for_pattern and find_file instead";
-                "Biskit is in memory-only mode, so the Luau language server is not available"
-            );
-        }
-
-        let mut guard = self.session.lock().await;
-        if let Some(existing) = guard.as_ref() {
-            return Ok(Arc::clone(existing));
-        }
-
-        let started = Instant::now();
-        let session = Session::start(&self.project, &self.settings).await?;
-        tracing::info!(
-            target: "biskit::lsp",
-            "language server ready in {}ms",
-            started.elapsed().as_millis()
-        );
-        *guard = Some(Arc::clone(&session));
-        Ok(session)
-    }
-
-    /// Starts the language server in the background so the first tool call does not pay for it.
-    ///
-    /// Acquisition, `initialize`, definition file loading and the server's own workspace indexing
-    /// add up to seconds at exactly the moment an agent is trying to do its first piece of work.
-    /// The session mutex means a real caller that arrives mid-startup waits on this attempt rather
-    /// than beginning a second one, so the only cost is starting a server that is never used.
-    ///
-    /// Failures are logged and dropped: the first real tool call runs the same path and reports
-    /// the failure properly, with its hint, to the caller who asked for it.
-    pub fn warm_up(self: &Arc<Self>) {
-        if self.settings.project.memory_only {
-            return;
-        }
-        let handle = Arc::clone(self);
-        tokio::spawn(async move {
-            if let Err(error) = handle.session().await {
-                tracing::warn!(
-                    target: "biskit::lsp",
-                    "background language server start failed, retrying on first use: {error}"
-                );
-            }
-        });
-    }
-
-    pub async fn restart(&self) -> Result<()> {
-        self.stop().await;
-        self.session().await.map(|_| ())
-    }
-
-    pub async fn stop(&self) {
-        let mut guard = self.session.lock().await;
-        // Shut down through the `Arc` rather than requiring sole ownership of it. Demanding
-        // ownership meant that any tool call still holding a clone silently skipped the shutdown,
-        // leaving the old luau-lsp process resident with every document it had open.
-        if let Some(existing) = guard.take() {
-            existing.shutdown().await;
-        }
-    }
-
-    pub fn project(&self) -> &Project {
-        &self.project
-    }
-
-    /// Every `.luau` and `.lua` file under `base`, or under the project root when `base` is absent.
-    ///
-    /// Taking a base means a query scoped to one directory walks that directory instead of walking
-    /// the whole project and discarding everything outside it.
-    pub async fn resolve_luau_files(&self, base: Option<&Path>) -> Result<Vec<PathBuf>> {
-        let root = base.unwrap_or(self.project.root()).to_path_buf();
-        let settings = self.settings.project.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let mut found = Vec::new();
-            for entry in crate::project::walk_builder(&root, &settings)?
-                .build()
-                .filter_map(Result::ok)
-            {
-                if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-                    continue;
-                }
-                let path = entry.into_path();
-                if path
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|extension| extension == "luau" || extension == "lua")
-                {
-                    found.push(path);
-                }
-            }
-            found.sort();
-            Ok(found)
-        })
-        .await
-        .map_err(|error| anyhow!("project scan panicked: {error}"))?
-    }
-}
-
-pub fn ensure_luau_file(path: &Path) -> Result<()> {
-    let extension = path.extension().and_then(|value| value.to_str());
-    if matches!(extension, Some("luau" | "lua")) {
-        return Ok(());
-    }
-    bail_hint!(
-        "the symbol tools only read .luau and .lua; locate one with find_file using the mask \
-         \"*.luau\", or use search_for_pattern for other file types";
-        "not a Luau source file: {}",
-        path.display()
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A project shaped like a real repository: a fat `.git`, a `.biskit`, a vendored tree, and
-    /// Luau spread over two directories.
-    fn fixture() -> (tempfile::TempDir, Project) {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-
-        let objects = root.join(".git").join("objects").join("ab");
-        std::fs::create_dir_all(&objects).unwrap();
-        for index in 0..8 {
-            std::fs::write(objects.join(format!("object{index}.luau")), "return {}\n").unwrap();
-        }
-        std::fs::create_dir_all(root.join(".biskit")).unwrap();
-        std::fs::write(root.join(".biskit").join("cached.luau"), "return {}\n").unwrap();
-
-        for directory in ["src/Services", "src/Shared", "Packages"] {
-            std::fs::create_dir_all(root.join(directory)).unwrap();
-            std::fs::write(
-                root.join(directory).join("Module.luau"),
-                "local Module = {}\nreturn Module\n",
-            )
-            .unwrap();
-        }
-        std::fs::write(root.join("src").join("legacy.lua"), "return {}\n").unwrap();
-        std::fs::write(root.join("README.md"), "not luau\n").unwrap();
-
-        let project = Project::open(root).unwrap();
-        (dir, project)
-    }
-
-    fn scan(project: &Project, settings: Settings, base: Option<&Path>) -> Vec<String> {
-        let handle = LanguageServerHandle::new(project.clone(), settings);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime
-            .block_on(handle.resolve_luau_files(base))
-            .unwrap()
-            .iter()
-            .map(|path| project.relativize(path).unwrap())
-            .collect()
-    }
-
-    #[test]
-    fn the_scan_skips_git_and_biskit() {
-        let (_dir, project) = fixture();
-        assert_eq!(
-            scan(&project, Settings::default(), None),
-            vec![
-                "Packages/Module.luau".to_string(),
-                "src/Services/Module.luau".to_string(),
-                "src/Shared/Module.luau".to_string(),
-                "src/legacy.lua".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn ignored_paths_are_honoured_by_the_scan() {
-        let (_dir, project) = fixture();
-        let mut settings = Settings::default();
-        settings.project.ignored_paths = vec!["Packages/".to_string(), "**/Shared".to_string()];
-
-        assert_eq!(
-            scan(&project, settings, None),
-            vec![
-                "src/Services/Module.luau".to_string(),
-                "src/legacy.lua".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_base_narrows_the_scan_to_that_subtree() {
-        let (_dir, project) = fixture();
-        let base = project.root().join("src").join("Services");
-
-        assert_eq!(
-            scan(&project, Settings::default(), Some(&base)),
-            vec!["src/Services/Module.luau".to_string()]
-        );
-    }
-
-    #[test]
-    fn an_invalid_ignored_path_fails_the_scan_rather_than_being_dropped() {
-        let (_dir, project) = fixture();
-        let mut settings = Settings::default();
-        settings.project.ignored_paths = vec!["[".to_string()];
-
-        let handle = LanguageServerHandle::new(project, settings);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let error = runtime
-            .block_on(handle.resolve_luau_files(None))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("ignored_paths"), "unexpected error: {error}");
-    }
 }

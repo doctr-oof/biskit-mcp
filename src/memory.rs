@@ -8,17 +8,23 @@ use crate::errors::hinted;
 use crate::project::{Project, normalize_separators};
 
 pub const MEMORY_EXTENSION: &str = "md";
-const MEM_REFERENCE_PATTERN: &str = r"mem:([A-Za-z0-9._\-/]+)";
+const MEM_REFERENCE_PATTERN: &str = r"mem:([A-Za-z0-9._\-/]*[A-Za-z0-9_\-])";
 
-const UNKNOWN_MEMORY_HINT: &str = "call list_memories to see which memories exist for this project";
-const REGEX_HINT: &str = "the pattern is a Rust regex matched with multi-line and \
-                          dot-matches-newline enabled; escape ( ) [ ] . * + ? | \\ to match them \
-                          literally";
-const REPLACEMENT_HINT: &str = "capture groups are numbered from 1 in the order their opening \
-                                parenthesis appears, and \"$$\" inserts one literal dollar sign";
+const UNKNOWN_MEMORY_HINT: &str = "call list_memories to see which memories exist";
+const REGEX_HINT: &str = "the pattern is a Rust regex with multi-line and dot-matches-newline \
+                          enabled; escape ( ) [ ] . * + ? | \\ to match literally";
+const REPLACEMENT_HINT: &str = "capture groups are numbered from 1 in opening-parenthesis order, \
+                                and \"$$\" inserts a literal dollar sign";
 
 pub struct MemoryStore {
     project: Project,
+}
+
+struct PlannedRewrite {
+    path: PathBuf,
+    original: String,
+    rewritten: String,
+    update: ReferenceUpdate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,7 +170,7 @@ impl MemoryStore {
         let target = self.path_for(to)?;
         if target.exists() {
             bail_hint!(
-                "pick a different new_name, or delete the existing memory first";
+                "pick a different new_name, or delete the existing memory";
                 "memory already exists: {}",
                 canonical_name(to)
             );
@@ -175,7 +181,13 @@ impl MemoryStore {
         std::fs::rename(&source, &target)?;
         self.prune_empty_dirs(&source);
 
-        let updated_references = self.rewrite_references(&stem(from), &stem(to))?;
+        let updated_references = match self.rewrite_references(&stem(from), &stem(to)) {
+            Ok(updates) => updates,
+            Err(error) => {
+                restore_moved_file(&target, &source);
+                return Err(error);
+            }
+        };
         Ok(RenameOutcome {
             from: canonical_name(from),
             to: canonical_name(to),
@@ -184,12 +196,41 @@ impl MemoryStore {
     }
 
     fn rewrite_references(&self, from_stem: &str, to_stem: &str) -> Result<Vec<ReferenceUpdate>> {
+        let planned = self.plan_reference_rewrites(from_stem, to_stem)?;
+
+        for index in 0..planned.len() {
+            let plan = &planned[index];
+            let Err(error) = std::fs::write(&plan.path, &plan.rewritten) else {
+                continue;
+            };
+            for done in &planned[..index] {
+                let _ = std::fs::write(&done.path, &done.original);
+            }
+            return Err(anyhow::Error::new(error).context(format!(
+                "failed to rewrite mem: references in {}",
+                plan.path.display()
+            )));
+        }
+
+        let mut updates: Vec<ReferenceUpdate> =
+            planned.into_iter().map(|plan| plan.update).collect();
+        updates.sort_by(|a, b| a.memory.cmp(&b.memory));
+        Ok(updates)
+    }
+
+    /// Reads every memory and works out the rewrite, so a read failure surfaces before anything is written.
+    fn plan_reference_rewrites(
+        &self,
+        from_stem: &str,
+        to_stem: &str,
+    ) -> Result<Vec<PlannedRewrite>> {
         let regex = Regex::new(MEM_REFERENCE_PATTERN)?;
-        let mut updates = Vec::new();
+        let mut planned = Vec::new();
 
         for name in self.list()? {
             let path = self.path_for(&name)?;
-            let original = std::fs::read_to_string(&path)?;
+            let original = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
             let mut occurrences = 0usize;
             let rewritten = regex.replace_all(&original, |captures: &regex::Captures<'_>| {
                 let target = &captures[1];
@@ -202,16 +243,19 @@ impl MemoryStore {
             });
 
             if occurrences > 0 {
-                std::fs::write(&path, rewritten.as_ref())?;
-                updates.push(ReferenceUpdate {
-                    memory: name,
-                    occurrences,
+                planned.push(PlannedRewrite {
+                    rewritten: rewritten.into_owned(),
+                    original,
+                    path,
+                    update: ReferenceUpdate {
+                        memory: name,
+                        occurrences,
+                    },
                 });
             }
         }
 
-        updates.sort_by(|a, b| a.memory.cmp(&b.memory));
-        Ok(updates)
+        Ok(planned)
     }
 
     fn path_for(&self, name: &str) -> Result<PathBuf> {
@@ -232,21 +276,13 @@ impl MemoryStore {
         let resolved = self.project.resolve(&relative)?;
         if !resolved.starts_with(self.project.memories_dir()) {
             bail_hint!(
-                "memory names are relative and nest with \"/\"; they may not contain \"..\" or \
-                 start from a drive or root";
+                "memory names are relative and nest with \"/\"; no \"..\", no drive or root prefix";
                 "memory name escapes the memories directory: {name}"
             );
         }
         Ok(resolved)
     }
 
-    /// Removes the directories a deleted memory left behind, as far as it can get.
-    ///
-    /// Tidying is not part of the outcome the caller asked for: a directory handle held by a cloud
-    /// sync client, a search indexer, or a virus scanner fails the removal with a permission error
-    /// even when the directory is empty, and reporting that as a failed delete would describe a
-    /// file that is already gone as still there. A directory left standing holds no memories and
-    /// `list` does not report it.
     fn prune_empty_dirs(&self, removed: &Path) {
         let memories_root = self.project.memories_dir();
         let mut cursor = removed.parent().map(Path::to_path_buf);
@@ -270,16 +306,18 @@ impl MemoryStore {
     }
 }
 
+/// Puts a renamed memory back where it came from, so a failed reference rewrite leaves no dangling pointers.
+fn restore_moved_file(target: &Path, source: &Path) {
+    if let Some(parent) = source.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::rename(target, source);
+}
+
 fn reference_matches(reference: &str, from_stem: &str) -> bool {
     stem(reference) == from_stem
 }
 
-/// Rejects a replacement that names a capture group the pattern does not define.
-///
-/// `$1` and `$name` are expansions, and an expansion the pattern cannot fill is substituted with
-/// the empty string rather than refused, so a dollar sign meant literally silently swallows the
-/// word that follows it. Callers writing prose into a memory hit this without ever asking for a
-/// capture group.
 fn validate_replacement(regex: &Regex, replacement: &str) -> Result<()> {
     let bytes = replacement.as_bytes();
     let mut cursor = 0;
@@ -292,7 +330,6 @@ fn validate_replacement(regex: &Regex, replacement: &str) -> Result<()> {
         }
 
         let (reference, next) = match bytes.get(after) {
-            // An unclosed brace is not an expansion at all, so it stands as written.
             Some(b'{') => match replacement[after + 1..].find('}') {
                 Some(end) => (&replacement[after + 1..after + 1 + end], after + end + 2),
                 None => (&replacement[after..after], after),
@@ -426,6 +463,26 @@ mod tests {
         assert_eq!(
             store.read("index").unwrap(),
             "See mem:domain/new-name and mem:domain/new-name plus mem:other"
+        );
+    }
+
+    #[test]
+    fn a_reference_keeps_the_punctuation_that_follows_it() {
+        let (_guard, store) = store();
+        store.create("old-name", "# Old", false).unwrap();
+        store
+            .create(
+                "index",
+                "See mem:old-name. Or mem:old-name/ or (mem:old-name), then mem:old-name.md.",
+                false,
+            )
+            .unwrap();
+
+        let outcome = store.rename("old-name", "new-name").unwrap();
+        assert_eq!(outcome.updated_references[0].occurrences, 4);
+        assert_eq!(
+            store.read("index").unwrap(),
+            "See mem:new-name. Or mem:new-name/ or (mem:new-name), then mem:new-name."
         );
     }
 

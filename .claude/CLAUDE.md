@@ -79,24 +79,7 @@
 </Section>
 
 <Section name="StyleRules" desc="Code style rules for any code you generate or audit. All rules MANDATORY.">
-    Ignore all style rules for functions named `vprint`, `vwarn`, and `vwarns`.
-    <Rule>Top-level local variables and local functions use PascalCase, no leading underscore. (`local MyGlobalVariable = true`)</Rule>
-    <Rule>Top-level imports and services use PascalCase, no leading underscore. (`local RunService = game:GetService("RunService")`)</Rule>
-    <Rule>Public methods of class, singleton, or job use PascalCase. (`Foo:BarBaz()`)</Rule>
-    <Rule>Public functions of class, singleton, or job use camelCase. (`Foo.barBaz()`)</Rule>
-    <Rule>Constants use SCREAMING_SNAKE_CASE.</Rule>
-    <Rule>Non-top-level variables and functions use camelCase.</Rule>
-    <Rule>Top-level functions prefixed with `local`.</Rule>
-    <Rule>Function parameters use camelCase.</Rule>
-    <Rule>Dictionary keys use PascalCase.</Rule>
-    <Rule>Private members (not Instances) of class or singleton start with underscore.</Rule>
-    <Rule>Replace unused parameters with single underscore ("_") to shadow.</Rule>
-    <Rule>Function parameters correctly typed for Luau. Shadowed parameters exempt.</Rule>
-    <Rule>Functions have valid return types (unless nil/empty). No `: ()` returns.</Rule>
-    <Rule>Line that is singular "end" statement needs new line after, unless next line also singular "end".</Rule>
-    <Rule>Use guard clauses instead of deeply-nested conditionals when possible.</Rule>
     <Rule>DON'T leave explanatory comments.</Rule>
     <Rule>DON'T leave TODOs, placeholders, or missing pieces unless instructed.</Rule>
-    <Rule>DON'T use Luau typecasts (`value :: type`) unless necessary for linting errors.</Rule>
 </Section>
 </Main>

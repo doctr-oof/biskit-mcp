@@ -7,12 +7,15 @@ use serde_json::{Map, Value};
 
 pub const DEFAULT_LSP_VERSION: &str = "v0.2.0";
 pub const DEFAULT_LSP_REPOSITORY: &str = "Sawhorse-Interactive/luau-lsp-carpenter";
+
 pub const DEFAULT_TYPE_DEFINITIONS_URL: &str =
     "https://luau-lsp.pages.dev/type-definitions/globalTypes.{security_level}.d.luau";
 pub const DEFAULT_ROBLOX_DOCS_URL: &str = "https://luau-lsp.pages.dev/api-docs/en-us.json";
 pub const DEFAULT_STANDARD_DOCS_URL: &str = "https://luau-lsp.pages.dev/api-docs/luau-en-us.json";
 
-/// The carpenter fork publishes no checksums; these are the digests pinned for `v0.2.0`.
+/// The first carpenter release whose language server resolves `shared("Name")`.
+pub const FIRST_SHARED_REQUIRE_VERSION: (u32, u32, u32) = (0, 2, 0);
+
 const PINNED_CHECKSUMS: [(&str, &str); 4] = [
     (
         "luau-lsp-win64.zip",
@@ -56,7 +59,6 @@ pub struct Settings {
     pub tools: ToolSettings,
 }
 
-/// A section whose keys are all commented out parses as null; treat that as "use defaults".
 fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -70,7 +72,7 @@ where
 pub struct LspSettings {
     pub version: String,
     pub repository: String,
-    /// Overrides the derived GitHub release asset URL. `{version}` and `{asset}` are substituted.
+    /// Overrides the derived GitHub release asset URL.
     pub download_url_template: Option<String>,
     /// Skips acquisition entirely and uses this executable.
     pub binary_path: Option<PathBuf>,
@@ -93,6 +95,8 @@ pub struct LspSettings {
     pub startup_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub diagnostics_settle_ms: u64,
+    /// Documents held open in the language server before the least recently used are closed.
+    pub max_open_documents: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -139,6 +143,8 @@ pub struct ProjectSettings {
     pub respect_gitignore: bool,
     /// Runs without the Luau language server: no acquisition, no process, no LSP-backed tools.
     pub memory_only: bool,
+    /// Counts the carpenter fork's `shared("Name")` string require as a dependency edge.
+    pub shared_require: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +155,10 @@ pub struct ToolSettings {
     pub max_listing_entries: usize,
     pub max_pattern_matches: usize,
     pub max_reference_matches: usize,
+    /// Keep symbol trees under `.biskit/cache/` so an unchanged file is not asked about again.
+    pub symbol_cache: bool,
+    /// Trees held before the least recently used are dropped.
+    pub max_cached_symbol_files: usize,
 }
 
 impl Default for LspSettings {
@@ -174,6 +184,7 @@ impl Default for LspSettings {
             startup_timeout_ms: 60_000,
             request_timeout_ms: 30_000,
             diagnostics_settle_ms: 1_500,
+            max_open_documents: 256,
         }
     }
 }
@@ -184,6 +195,7 @@ impl Default for ProjectSettings {
             ignored_paths: Vec::new(),
             respect_gitignore: true,
             memory_only: false,
+            shared_require: true,
         }
     }
 }
@@ -192,10 +204,12 @@ impl Default for ToolSettings {
     fn default() -> Self {
         Self {
             excluded: Vec::new(),
-            max_answer_chars: 150_000,
+            max_answer_chars: 50_000,
             max_listing_entries: 2_000,
             max_pattern_matches: 200,
             max_reference_matches: 200,
+            symbol_cache: true,
+            max_cached_symbol_files: 4_000,
         }
     }
 }
@@ -228,12 +242,25 @@ impl LspSettings {
     }
 
     /// luau-lsp expects VS Code style dotted keys; the first segment is discarded by its parser.
-    pub fn workspace_configuration(&self) -> Value {
+    pub fn workspace_configuration(&self, project: &ProjectSettings) -> Value {
         let mut dotted = Map::new();
         dotted.insert(
             "luau-lsp.platform.type".to_string(),
             Value::String(self.platform.as_str().to_string()),
         );
+
+        if !project.ignored_paths.is_empty() {
+            dotted.insert(
+                "luau-lsp.ignoreGlobs".to_string(),
+                Value::Array(
+                    project
+                        .ignored_paths
+                        .iter()
+                        .map(|pattern| Value::String(pattern.clone()))
+                        .collect(),
+                ),
+            );
+        }
 
         let sourcemap_enabled = self.platform == LuauPlatform::Roblox && self.sourcemap.is_some();
         dotted.insert(
@@ -251,6 +278,10 @@ impl LspSettings {
             Value::Bool(false),
         );
 
+        for (key, value) in inlay_hint_defaults() {
+            dotted.insert(key.to_string(), value);
+        }
+
         if let Value::Object(overrides) = &self.server_settings {
             for (key, value) in overrides {
                 dotted.insert(key.clone(), value.clone());
@@ -261,7 +292,22 @@ impl LspSettings {
     }
 }
 
-/// Mirrors luau-lsp's `dottedToClientConfiguration`: split on `.`, drop the first segment.
+fn inlay_hint_defaults() -> [(&'static str, Value); 5] {
+    [
+        (
+            "luau-lsp.inlayHints.parameterNames",
+            Value::String("all".to_string()),
+        ),
+        ("luau-lsp.inlayHints.parameterTypes", Value::Bool(true)),
+        ("luau-lsp.inlayHints.variableTypes", Value::Bool(true)),
+        ("luau-lsp.inlayHints.functionReturnTypes", Value::Bool(true)),
+        (
+            "luau-lsp.inlayHints.typeHintMaxLength",
+            Value::Number(50.into()),
+        ),
+    ]
+}
+
 fn expand_dotted_keys(dotted: &Map<String, Value>) -> Value {
     let mut root = Map::new();
     for (key, value) in dotted {
@@ -313,8 +359,6 @@ fn read_yaml_value(path: &Path) -> Result<Value> {
     if raw.trim().is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-    // Settings files are heavily commented; capturing comment text would hit the parser's
-    // buffered-comment budget without giving Biskit anything it reads.
     let mut options = serde_saphyr::Options::default();
     options.emit_comments = false;
     let parsed: Value = serde_saphyr::from_str_with_options(&raw, options)
@@ -402,7 +446,7 @@ mod tests {
             ..LspSettings::default()
         };
 
-        let configuration = settings.workspace_configuration();
+        let configuration = settings.workspace_configuration(&ProjectSettings::default());
         assert_eq!(configuration["platform"]["type"], "roblox");
         assert_eq!(
             configuration["sourcemap"]["sourcemapFile"],
@@ -410,6 +454,70 @@ mod tests {
         );
         assert_eq!(configuration["sourcemap"]["enabled"], true);
         assert_eq!(configuration["diagnostics"]["strictDatamodelTypes"], true);
+    }
+
+    #[test]
+    fn inlay_hints_are_on_by_default_and_still_overridable() {
+        let configuration =
+            LspSettings::default().workspace_configuration(&ProjectSettings::default());
+        assert_eq!(configuration["inlayHints"]["parameterNames"], "all");
+        assert_eq!(configuration["inlayHints"]["variableTypes"], true);
+        assert_eq!(configuration["inlayHints"]["typeHintMaxLength"], 50);
+
+        let overridden = LspSettings {
+            server_settings: serde_json::json!({
+                "luau-lsp.inlayHints.variableTypes": false
+            }),
+            ..LspSettings::default()
+        }
+        .workspace_configuration(&ProjectSettings::default());
+        assert_eq!(overridden["inlayHints"]["variableTypes"], false);
+        assert_eq!(
+            overridden["inlayHints"]["parameterNames"], "all",
+            "one override does not clear the rest"
+        );
+    }
+
+    #[test]
+    fn ignored_paths_are_forwarded_to_the_language_server() {
+        let project = ProjectSettings {
+            ignored_paths: vec!["Packages/".to_string(), "**/node_modules".to_string()],
+            ..Default::default()
+        };
+
+        let configuration = LspSettings::default().workspace_configuration(&project);
+        assert_eq!(
+            configuration["ignoreGlobs"],
+            serde_json::json!(["Packages/", "**/node_modules"])
+        );
+    }
+
+    #[test]
+    fn an_explicit_ignore_globs_override_wins_outright() {
+        let project = ProjectSettings {
+            ignored_paths: vec!["Packages/".to_string()],
+            ..Default::default()
+        };
+        let settings = LspSettings {
+            server_settings: serde_json::json!({"luau-lsp.ignoreGlobs": ["only/this"]}),
+            ..LspSettings::default()
+        };
+
+        let configuration = settings.workspace_configuration(&project);
+        assert_eq!(
+            configuration["ignoreGlobs"],
+            serde_json::json!(["only/this"])
+        );
+    }
+
+    #[test]
+    fn no_ignored_paths_leaves_the_servers_own_default_alone() {
+        let configuration =
+            LspSettings::default().workspace_configuration(&ProjectSettings::default());
+        assert!(
+            configuration.get("ignoreGlobs").is_none(),
+            "an empty list would clobber the server's default rather than say nothing"
+        );
     }
 
     #[test]

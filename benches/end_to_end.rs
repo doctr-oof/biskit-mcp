@@ -1,14 +1,8 @@
 //! End-to-end timing against a real project and a real `luau-lsp`.
 //!
-//! Opt-in, because it starts a language server and can take a minute:
-//!
 //! ```text
 //! BISKIT_BENCH_PROJECT=/path/to/checkout cargo bench --bench end_to_end
 //! ```
-//!
-//! What it is here to answer is the one claim the micro-benchmarks cannot: what a
-//! `documentSymbol` round trip actually costs, and therefore what skipping one is worth. Every
-//! other measurement in `hot_paths.rs` is denominated in that number.
 
 use std::hint::black_box;
 use std::path::PathBuf;
@@ -19,10 +13,7 @@ use biskit_mcp::lsp::queries::{FindSymbolRequest, SymbolQuery, prefilter_by_lite
 use biskit_mcp::lsp::session::LanguageServerHandle;
 use biskit_mcp::project::Project;
 
-/// Files sampled for the per-round-trip measurement. The whole project would be accurate and
-/// would also take as long as the regression this change exists to remove.
 const ROUND_TRIP_SAMPLE: usize = 40;
-/// A name chosen so that no file in any project defines it, which is the exploratory case.
 const ABSENT_NAME: &str = "NoSuchSymbolExistsAnywhereHere";
 
 fn main() {
@@ -47,7 +38,6 @@ async fn run(root: &str) -> anyhow::Result<()> {
 
     println!("project           {root}");
 
-    // F1: what the first LSP-backed tool call used to pay for before the warm-up existed.
     let started = Instant::now();
     let session = handle.session().await?;
     println!("startup           {:?}", started.elapsed());
@@ -55,7 +45,6 @@ async fn run(root: &str) -> anyhow::Result<()> {
     let files = handle.resolve_luau_files(None).await?;
     println!("luau files        {}", files.len());
 
-    // A1: how much of the candidate set a literal pre-filter removes, and what it cost to do it.
     let started = Instant::now();
     let survivors = prefilter_by_literal(files.clone(), Some(ABSENT_NAME)).await?;
     let prefilter = started.elapsed();
@@ -66,7 +55,6 @@ async fn run(root: &str) -> anyhow::Result<()> {
         survivors.len()
     );
 
-    // The number everything else is denominated in.
     let sample: Vec<PathBuf> = files.iter().take(ROUND_TRIP_SAMPLE).cloned().collect();
     let started = Instant::now();
     let mut symbols_seen = 0usize;
@@ -88,9 +76,6 @@ async fn run(root: &str) -> anyhow::Result<()> {
          {prefilter:?}"
     );
 
-    // The tool call itself, with the pre-filter in place. The sample loop above left its files
-    // open, and luau-lsp answers faster for a document it has already analysed, so treat these as
-    // warm-session figures rather than as the cost of the very first query.
     for (label, name, substring) in [
         ("absent name", ABSENT_NAME.to_string(), false),
         ("substring query", "Service".to_string(), true),
@@ -110,6 +95,7 @@ async fn run(root: &str) -> anyhow::Result<()> {
                 depth: 0,
                 include_body: false,
                 include_detail: false,
+                include_locals: false,
                 include_kinds: Vec::new(),
                 exclude_kinds: Vec::new(),
                 substring_matching: substring,

@@ -1,0 +1,36 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build and install locally",
+			"detail": "Release build, then replace the installed biskit-mcp binary for live testing.",
+			"type": "process",
+			"command": "sh",
+			"args": [
+				"${workspaceFolder}/scripts/install-local.sh"
+			],
+			"windows": {
+				"command": "powershell",
+				"args": [
+					"-NoProfile",
+					"-ExecutionPolicy",
+					"Bypass",
+					"-File",
+					"${workspaceFolder}\\scripts\\install-local.ps1"
+				]
+			},
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [
+				"$rustc"
+			],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			}
+		}
+	]
+}

@@ -15,11 +15,10 @@ pub const LOCAL_SETTINGS_FILE: &str = "settings.local.yml";
 const GITIGNORE_CONTENTS: &str = "settings.local.yml\n";
 
 const RELATIVE_PATH_HINT: &str = "pass a path relative to the project root, such as \
-                                  \"src/init.luau\", or \".\" for the root itself";
-const ESCAPED_ROOT_HINT: &str = "Biskit only reads inside the project root; drop the leading \
-                                 \"..\" segments";
+                                  \"src/init.luau\", or \".\" for the root";
+const ESCAPED_ROOT_HINT: &str = "drop the leading \"..\" segments; Biskit only reads inside the \
+                                 project root";
 
-/// Markers consulted only when no ancestor holds a `.biskit` directory.
 const FALLBACK_MARKERS: [&str; 2] = [".git", "default.project.json"];
 
 /// Every entry that marks a project root, in the order discovery considers them.
@@ -114,10 +113,23 @@ impl Project {
             }
         }
 
-        if !resolved.starts_with(&self.root) {
+        if !resolved.starts_with(&self.root) || !self.physically_inside(&resolved) {
             bail_hint!(ESCAPED_ROOT_HINT; "path escapes the project root: {relative}");
         }
         Ok(resolved)
+    }
+
+    /// Whether `resolved` still lands under the root once every symlink and junction on it is followed.
+    ///
+    /// `resolve` is called for paths that do not exist yet, so the check runs against the nearest ancestor that does.
+    fn physically_inside(&self, resolved: &Path) -> bool {
+        for ancestor in resolved.ancestors() {
+            let Ok(canonical) = canonicalize(ancestor) else {
+                continue;
+            };
+            return canonical.starts_with(&self.root);
+        }
+        true
     }
 
     pub fn relativize(&self, absolute: &Path) -> Result<String> {
@@ -130,13 +142,14 @@ impl Project {
 
 /// The one walker every project traversal is built from.
 ///
-/// Both the file tools and the Luau file scan need the same exclusions, and when they were
-/// configured separately they drifted: the scan descended into `.git`, which on a real repository
-/// is tens of thousands of stat calls that can never yield a `.luau` file.
-///
-/// `ignore` detects `.git` only so it can locate gitignore files; it never excludes the directory
-/// from traversal on its own, so the exclusion has to be stated here.
-pub fn walk_builder(base: &Path, settings: &crate::config::ProjectSettings) -> Result<WalkBuilder> {
+/// `project.ignored_paths` patterns are written relative to the project root, so `root` is what
+/// they are matched against however deep inside it `base` starts. Rooting them at `base` instead
+/// silently disarms every pattern once a caller names a subdirectory.
+pub fn walk_builder(
+    root: &Path,
+    base: &Path,
+    settings: &crate::config::ProjectSettings,
+) -> Result<WalkBuilder> {
     let mut builder = WalkBuilder::new(base);
     builder
         .hidden(false)
@@ -147,7 +160,7 @@ pub fn walk_builder(base: &Path, settings: &crate::config::ProjectSettings) -> R
         .follow_links(false);
 
     if !settings.ignored_paths.is_empty() {
-        builder.overrides(build_overrides(base, &settings.ignored_paths)?);
+        builder.overrides(build_overrides(root, &settings.ignored_paths)?);
     }
 
     builder.filter_entry(|entry| {
@@ -157,24 +170,17 @@ pub fn walk_builder(base: &Path, settings: &crate::config::ProjectSettings) -> R
     Ok(builder)
 }
 
-/// Turns `project.ignored_paths` into exclusions.
-///
-/// `WalkBuilder::add_ignore` takes the path of an ignore *file*, not a pattern, so passing the
-/// patterns to it excluded nothing at all. An override glob prefixed with `!` is the API that
-/// carries gitignore syntax, which is what the setting has always been documented as taking.
-fn build_overrides(base: &Path, patterns: &[String]) -> Result<Override> {
-    let mut overrides = OverrideBuilder::new(base);
+fn build_overrides(root: &Path, patterns: &[String]) -> Result<Override> {
+    let mut overrides = OverrideBuilder::new(root);
     for pattern in patterns {
         let negated = match pattern.strip_prefix('!') {
-            // A leading "!" in gitignore syntax re-includes, which for a list named
-            // "ignored_paths" would invert the caller's stated intent. Take it literally instead.
             Some(rest) => rest,
             None => pattern.as_str(),
         };
         overrides.add(&format!("!{negated}")).map_err(|error| {
             crate::errors::hinted(
                 format!("invalid project.ignored_paths entry {pattern:?}: {error}"),
-                "entries use gitignore syntax, one pattern per entry, for example \"Packages/\" \
+                "entries use gitignore syntax, one pattern each, for example \"Packages/\" \
                  or \"**/node_modules\"",
             )
         })?;
@@ -202,12 +208,6 @@ pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// Walks up from `start` and returns the ancestor that owns the project.
-///
-/// Agents launch MCP servers with a working directory that is usually, but not always, the project
-/// root, so the ascent lets a nested working directory still resolve to the right project.
-///
-/// A `.biskit` directory anywhere in the chain wins over a nearer `.git` or `default.project.json`,
-/// because it is the only marker that states the directory is deliberately a Biskit project.
 pub fn discover_root(start: &Path) -> Option<PathBuf> {
     let start = canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
     let nearest = |markers: &[&str]| {
@@ -304,10 +304,62 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_bootstrap_reports_nothing_and_keeps_edited_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::open(dir.path()).unwrap();
+        project.bootstrap().unwrap();
+
+        let edited = "project:\n  memory_only: true\n";
+        std::fs::write(project.settings_path(), edited).unwrap();
+        std::fs::write(project.local_settings_path(), edited).unwrap();
+
+        let report = project.bootstrap().unwrap();
+
+        assert!(!report.created_biskit_dir);
+        assert!(!report.created_gitignore);
+        assert!(!report.created_settings);
+        assert!(!report.created_local_settings);
+        assert_eq!(
+            std::fs::read_to_string(project.settings_path()).unwrap(),
+            edited
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.local_settings_path()).unwrap(),
+            edited
+        );
+    }
+
+    #[test]
     fn resolve_refuses_to_escape_the_project_root() {
         let dir = tempfile::tempdir().unwrap();
         let project = Project::open(dir.path()).unwrap();
         assert!(project.resolve("../outside.luau").is_err());
         assert!(project.resolve("src/../src/init.luau").is_ok());
+    }
+
+    #[test]
+    fn resolve_refuses_a_link_that_points_out_of_the_project_root() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secrets.env");
+        std::fs::write(&secret, "TOKEN=1\n").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("notes.luau");
+
+        #[cfg(windows)]
+        let created = std::os::windows::fs::symlink_file(&secret, &link).is_ok();
+        #[cfg(unix)]
+        let created = std::os::unix::fs::symlink(&secret, &link).is_ok();
+
+        if !created {
+            return;
+        }
+
+        let project = Project::open(dir.path()).unwrap();
+        assert!(
+            project.resolve("notes.luau").is_err(),
+            "a link out of the root must not resolve"
+        );
+        assert!(project.resolve("src/init.luau").is_ok());
     }
 }
