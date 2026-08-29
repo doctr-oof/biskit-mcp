@@ -1,6 +1,6 @@
 [package]
 name = "biskit-mcp"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Project memory and Luau code intelligence over the Model Context Protocol"
