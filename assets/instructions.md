@@ -59,6 +59,10 @@
     <Tool name="query_roblox_api" use="Check a real Roblox class, member, or enum" />
     <Tool name="get_file_diagnostics" use="Check whether a file type-checks" />
     <Tool name="get_symbol_diagnostics" use="Check a symbol and its callers for breakage after an edit" />
+    <Tool name="list_wally_packages" use="See which Wally packages this project depends on" />
+    <Tool name="search_wally_packages" use="Find a package in the Wally registry before adding it" />
+    <Tool name="add_wally_package" use="Declare a Wally dependency and install it" />
+    <Tool name="remove_wally_package" use="Drop a Wally dependency and rebuild the package tree" />
     <Tool name="find_file" use="Find files by name or glob" />
     <Tool name="list_dir" use="See what is in a directory" />
     <Tool name="search_for_pattern" use="Regex search across file contents" />
@@ -375,6 +379,101 @@
         not carry numeric `EnumItem.Value`: neither type definitions nor documentation dump Biskit
         caches records those numbers. Serialised enum read back as number cannot be named from this
         tool; follow `learn_more_link` or call `Enum.X:FromValue(n)` at runtime.
+    </Topic>
+</Section>
+
+<Section name="WallyPackages" desc="The four tools that touch dependencies. Only reach for them when asked.">
+    <Rule>
+        Do not survey Wally packages on your own initiative. These tools exist for when the human
+        asks about dependencies, names a package, or asks for one to be added or removed. Checking
+        whether some package might help is not part of ordinary work here, and every registry call
+        costs a network round trip.
+    </Rule>
+
+    <Rule>
+        Biskit never installs Wally. When no `wally` executable is on PATH, all four tools fail
+        saying so, and that is the whole answer: do not offer to install it, and do not work around
+        it by editing `wally.toml` with your own write tools. A version manager such as Aftman or
+        Rokit puts a shim on PATH that refuses until the tool is in its manifest, so "Wally is not
+        available" can mean present-but-not-runnable; the error says which.
+    </Rule>
+
+    <Topic name="ListWallyPackages">
+        `list_wally_packages` reads `wally.toml` and `wally.lock` off disk and costs no registry
+        request. Each entry carries the requirement as written, the section it sits in, the version
+        the lockfile resolved, and `installed`. `installed: true` means the package's own folder is
+        under `_Index` and a require of it resolves; `installed: false` means it is missing or the
+        index directory was left half written, so every require of it fails whatever `wally.toml`
+        says. `lock_out_of_date: true` means the lockfile holds a version the requirement no longer
+        allows.
+
+        The `alias` is the key in `wally.toml`, and it is the name the package is required by:
+        `Packages.Roact`, not `Packages.roact`. Read it there rather than guessing from the package
+        name.
+    </Topic>
+
+    <Topic name="SearchWallyPackages">
+        `search_wally_packages` matches on scope, name, and description, so `promise` and `evaera`
+        both find the same package. It reports `latest_version`, which is the version
+        `add_wally_package` would pin if you passed none. Use it to confirm a scope and name before
+        adding: a package name recalled from memory is a package that may not exist.
+
+        Answers are cached briefly and requests are paced, so a repeated query is free and a burst
+        of new ones is slow on purpose.
+    </Topic>
+
+    <Topic name="AddAndRemove">
+        `add_wally_package` writes the requirement into `wally.toml` and runs `wally install`.
+        Omit `version` to pin the newest published release as a caret requirement; prereleases are
+        never chosen for you, so pass `version` to take one deliberately.
+
+        `wally install` deletes `Packages`, `ServerPackages`, and `DevPackages` and rebuilds all
+        three from the lockfile. Nothing about it is additive, and the whole tree is rewritten
+        however small the change. When adding several packages, pass `install: false` on all but the
+        last so one install covers them; between those calls the manifest and the tree disagree, and
+        the result says so.
+
+        Both tools report `install_ran`, which says only whether `wally install` was run. It is not
+        a claim about what is on disk; `list_wally_packages` and its `installed` field answer that.
+
+        A package is declared in one realm only. Adding one that is already declared elsewhere is
+        refused, and `overwrite` is what moves it, so `remove_wally_package`'s `realm` argument is
+        only for a hand written `wally.toml` that declares the same name twice. Leave it off
+        otherwise.
+
+        `realm` decides both the section and the directory: `shared` is `[dependencies]` and
+        `Packages`, `server` is `[server-dependencies]` and `ServerPackages`, `dev` is
+        `[dev-dependencies]` and `DevPackages`. A server package may depend on shared packages; a
+        shared package may not depend on server ones.
+
+        `server` and `dev` carry one more requirement: Wally will not link a server or dev package
+        that depends on a shared package until `wally.toml` says where shared packages live.
+
+        ```toml
+        [place]
+        shared-packages = "game.ReplicatedStorage.Packages"
+        ```
+
+        Almost every non-trivial package has shared dependencies, so without that table those two
+        realms fail to install. The add result carries a note when the table is absent, and the
+        install error names it as the fix.
+
+        A failed `wally install` is not a no-op. Wally empties `Packages`, `ServerPackages`, and
+        `DevPackages` before it rebuilds them, so when it gives up partway, packages that had
+        nothing to do with the call are gone from disk. Biskit rolls the `wally.toml` edit back and
+        names what is missing, but restoring the tree takes a successful `wally install`. Report
+        that to the human rather than moving on.
+
+        `remove_wally_package` takes the package name or its alias. Before removing, call
+        `get_require_graph` or `find_referencing_symbols` on what requires it — a removed package
+        leaves every require of it broken, and the diagnostic arrives only after the tree is
+        rebuilt.
+    </Topic>
+
+    <Topic name="AfterInstalling">
+        Installing rewrites the package tree, so the sourcemap generated before it is stale and
+        knows nothing about the new modules. Regenerate it, or the language server will not resolve
+        requires into the package you just added. `get_status` reports sourcemap staleness.
     </Topic>
 </Section>
 

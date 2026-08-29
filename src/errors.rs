@@ -28,6 +28,19 @@ pub fn hinted(message: impl Into<String>, hint: impl Into<String>) -> anyhow::Er
     })
 }
 
+/// Restates an error under a different hint, for when the caller knows something the raiser did
+/// not: what was rolled back, or what else the failure damaged.
+pub fn rehinted(error: anyhow::Error, hint: impl Into<String>) -> anyhow::Error {
+    let mut message = error.to_string();
+    for cause in error.chain().skip(1) {
+        let cause = cause.to_string();
+        if !message.contains(&cause) {
+            message.push_str(&format!("\ncaused by: {cause}"));
+        }
+    }
+    hinted(message, hint)
+}
+
 macro_rules! bail_hint {
     ($hint:expr; $($message:tt)*) => {
         return ::core::result::Result::Err($crate::errors::hinted(format!($($message)*), $hint))
@@ -75,6 +88,29 @@ mod tests {
             render("read_memory", &error),
             "read_memory failed: memory not found: notes"
         );
+    }
+
+    #[test]
+    fn a_rehinted_error_keeps_its_message_and_takes_the_new_hint() {
+        let original = hinted("`wally install` failed", "fix what the output names");
+        let rehinted = rehinted(original, "the wally.toml edit was rolled back");
+        let rendered = render("add_wally_package", &rehinted);
+
+        assert!(rendered.contains("add_wally_package failed: `wally install` failed"));
+        assert!(rendered.contains("hint: the wally.toml edit was rolled back"));
+        assert!(
+            !rendered.contains("fix what the output names"),
+            "the stale hint must not survive: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_rehinted_error_folds_its_causes_into_the_message() {
+        let error = anyhow::anyhow!("connection reset").context("request failed: https://x/y");
+        let rendered = render("add_wally_package", &rehinted(error, "try again"));
+
+        assert!(rendered.contains("request failed: https://x/y"));
+        assert!(rendered.contains("connection reset"));
     }
 
     #[test]

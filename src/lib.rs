@@ -12,5 +12,6 @@ pub mod server;
 pub mod setup;
 pub(crate) mod status;
 pub mod upgrade;
+pub mod wally;
 
 pub(crate) use errors::bail_hint;
