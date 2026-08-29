@@ -201,7 +201,7 @@ pub fn download(url: &str, allowed_hosts: &[&str]) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-fn check_host(url: &str, allowed_hosts: &[&str]) -> Result<()> {
+pub(crate) fn check_host(url: &str, allowed_hosts: &[&str]) -> Result<()> {
     let without_scheme = url
         .strip_prefix("https://")
         .ok_or_else(|| anyhow!("refusing a non-HTTPS URL: {url}"))?;

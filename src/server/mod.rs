@@ -24,14 +24,16 @@ use crate::roblox::api::ApiQuery;
 use crate::roblox::context;
 use crate::roblox::requires::{Direction, GraphRequest};
 pub use crate::server::requests::{
-    CreateMemoryRequest, EditMemoryRequest, ExplainSymbolRequest, FileDiagnosticsRequest,
-    FindDeclarationRequest, FindFileRequest, FindSymbolRequestInput, InlayHintsRequest,
-    ListDirRequest, MemoryNameRequest, ModuleContextRequest, NoArguments, RenameMemoryRequest,
-    RequireGraphRequest, ResolveInstancePathRequest, RobloxApiRequest, SearchForPatternRequest,
-    SearchOutputMode, SignatureHelpRequest, SymbolDiagnosticsRequest, SymbolLocationRequest,
-    SymbolsOverviewRequest, TypeDefinitionRequest,
+    AddWallyPackageRequest, CreateMemoryRequest, EditMemoryRequest, ExplainSymbolRequest,
+    FileDiagnosticsRequest, FindDeclarationRequest, FindFileRequest, FindSymbolRequestInput,
+    InlayHintsRequest, ListDirRequest, MemoryNameRequest, ModuleContextRequest, NoArguments,
+    RemoveWallyPackageRequest, RenameMemoryRequest, RequireGraphRequest,
+    ResolveInstancePathRequest, RobloxApiRequest, SearchForPatternRequest, SearchOutputMode,
+    SearchWallyPackagesRequest, SignatureHelpRequest, SymbolDiagnosticsRequest,
+    SymbolLocationRequest, SymbolsOverviewRequest, TypeDefinitionRequest,
 };
 use crate::server::results::{OVERRUN_HINT, ToolResult, fail, truncate_at_char_boundary};
+use crate::wally::{AddRequest, RemoveRequest, WallyTools};
 use crate::{prompts, status};
 
 #[derive(Clone)]
@@ -46,6 +48,7 @@ struct Inner {
     files: FileTools,
     language_server: Arc<LanguageServerHandle>,
     roblox: Arc<RobloxIndex>,
+    wally: Arc<WallyTools>,
     root_source: &'static str,
 }
 
@@ -108,31 +111,46 @@ const LANGUAGE_SERVER_TOOLS: [&str; 15] = [
     "query_roblox_api",
 ];
 
+/// Tools that shell out to Wally or reach its registry. Dropped in memory-only mode, which is for
+/// projects Biskit is not expected to build.
+const WALLY_TOOLS: [&str; 4] = [
+    "list_wally_packages",
+    "search_wally_packages",
+    "add_wally_package",
+    "remove_wally_package",
+];
+
 #[tool_router]
 impl Biskit {
     pub fn new(project: Project, settings: Settings, root_source: &'static str) -> Self {
         let memories = MemoryStore::new(project.clone());
         let files = FileTools::new(project.clone(), settings.clone());
         let roblox = Arc::new(RobloxIndex::new(project.clone(), settings.clone()));
+        let wally = Arc::new(WallyTools::new(project.clone(), &settings));
         let language_server = Arc::new(LanguageServerHandle::new(project, settings.clone()));
 
         let memory_only = settings.project.memory_only;
         let mut tool_router = Self::tool_router();
         if memory_only {
-            for name in LANGUAGE_SERVER_TOOLS {
+            for name in LANGUAGE_SERVER_TOOLS.iter().chain(WALLY_TOOLS.iter()) {
                 tool_router.remove_route(name);
             }
             tracing::info!(
                 target: "biskit",
-                "memory-only mode: the language server and its {} tools are disabled",
-                LANGUAGE_SERVER_TOOLS.len()
+                "memory-only mode: the language server and its {} tools are disabled, along with \
+                 the {} Wally tools",
+                LANGUAGE_SERVER_TOOLS.len(),
+                WALLY_TOOLS.len()
             );
         }
 
         for excluded in &settings.tools.excluded {
+            let dropped_by_mode = memory_only
+                && (LANGUAGE_SERVER_TOOLS.contains(&excluded.as_str())
+                    || WALLY_TOOLS.contains(&excluded.as_str()));
             if tool_router.has_route(excluded) {
                 tool_router.remove_route(excluded);
-            } else if !(memory_only && LANGUAGE_SERVER_TOOLS.contains(&excluded.as_str())) {
+            } else if !dropped_by_mode {
                 tracing::warn!(
                     target: "biskit",
                     "tools.excluded lists an unknown tool: {excluded}"
@@ -147,6 +165,7 @@ impl Biskit {
                 files,
                 language_server,
                 roblox,
+                wally,
                 root_source,
             }),
             tool_router,
@@ -669,6 +688,86 @@ impl Biskit {
     }
 
     #[tool]
+    #[doc = descriptions::description!(list_wally_packages)]
+    async fn list_wally_packages(
+        &self,
+        Parameters(NoArguments {}): Parameters<NoArguments>,
+    ) -> ToolResult {
+        self.ok(
+            "list_wally_packages",
+            &self
+                .inner
+                .wally
+                .list()
+                .await
+                .map_err(fail("list_wally_packages"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(search_wally_packages)]
+    async fn search_wally_packages(
+        &self,
+        Parameters(request): Parameters<SearchWallyPackagesRequest>,
+    ) -> ToolResult {
+        let default = self.inner.settings.wally.max_search_results;
+        self.ok(
+            "search_wally_packages",
+            &self
+                .inner
+                .wally
+                .search(&request.query, request.max_results.unwrap_or(default))
+                .await
+                .map_err(fail("search_wally_packages"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(add_wally_package)]
+    async fn add_wally_package(
+        &self,
+        Parameters(request): Parameters<AddWallyPackageRequest>,
+    ) -> ToolResult {
+        self.ok(
+            "add_wally_package",
+            &self
+                .inner
+                .wally
+                .add(AddRequest {
+                    package: &request.package,
+                    version: request.version.as_deref(),
+                    realm: request.realm.as_deref(),
+                    alias: request.alias.as_deref(),
+                    overwrite: request.overwrite,
+                    install: request.install,
+                })
+                .await
+                .map_err(fail("add_wally_package"))?,
+        )
+    }
+
+    #[tool]
+    #[doc = descriptions::description!(remove_wally_package)]
+    async fn remove_wally_package(
+        &self,
+        Parameters(request): Parameters<RemoveWallyPackageRequest>,
+    ) -> ToolResult {
+        self.ok(
+            "remove_wally_package",
+            &self
+                .inner
+                .wally
+                .remove(RemoveRequest {
+                    package: &request.package,
+                    realm: request.realm.as_deref(),
+                    install: request.install,
+                })
+                .await
+                .map_err(fail("remove_wally_package"))?,
+        )
+    }
+
+    #[tool]
     #[doc = descriptions::description!(get_status)]
     async fn get_status(&self, Parameters(NoArguments {}): Parameters<NoArguments>) -> ToolResult {
         let status = status::collect(
@@ -794,9 +893,33 @@ mod tests {
     }
 
     #[test]
+    fn wally_tools_are_routed_by_default() {
+        let (_dir, biskit) = open(false);
+        for name in WALLY_TOOLS {
+            assert!(biskit.tool_router.has_route(name), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn an_excluded_wally_tool_is_dropped() {
+        let (_dir, biskit) = open_with(
+            false,
+            ToolSettings {
+                excluded: vec!["add_wally_package".to_string()],
+                ..Default::default()
+            },
+        );
+        assert!(!biskit.tool_router.has_route("add_wally_package"));
+        assert!(
+            biskit.tool_router.has_route("list_wally_packages"),
+            "excluding one Wally tool must not drop the rest"
+        );
+    }
+
+    #[test]
     fn memory_only_drops_language_server_tools() {
         let (_dir, biskit) = open(true);
-        for name in LANGUAGE_SERVER_TOOLS {
+        for name in LANGUAGE_SERVER_TOOLS.iter().chain(WALLY_TOOLS.iter()) {
             assert!(!biskit.tool_router.has_route(name), "still routed: {name}");
         }
         for name in [

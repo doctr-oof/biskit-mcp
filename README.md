@@ -207,8 +207,49 @@ These are all of the tools Biskit provides your agent. You can exclude them via 
   any require cycles, `query_roblox_api` answers questions about the real Roblox API from the type
   definitions Biskit already caches, and `get_module_context` composes all of it into one call for a
   module you have not seen before.
+- **Wally**: `list_wally_packages` reports what `wally.toml` declares and whether each package is
+  actually on disk, `search_wally_packages` searches the registry, `add_wally_package` and
+  `remove_wally_package` edit the manifest and run `wally install`. See below.
 - **Files and orientation**: `list_dir`, `find_file`, `search_for_pattern`, `initial_instructions`,
   `get_status`.
+
+### Wally
+
+Biskit never installs Wally, and never publishes packages. The four Wally tools look for a `wally`
+executable on PATH, or at `wally.binary_path`, and refuse to answer when there is none. They also
+refuse when the executable is found but will not run, which is what a version manager shim reports
+before the tool is listed in its manifest. Installing Wally is yours to do, from
+[wally.run](https://wally.run).
+
+`add_wally_package` writes the requirement into `wally.toml` and then runs `wally install`. Wally
+deletes and rebuilds `Packages/`, `ServerPackages/`, and `DevPackages/` on every install, so this is
+never an additive operation regardless of how small the manifest change was. Pass `install: false`
+to edit the manifest alone when adding several packages before one install. `wally.toml` is edited
+in place with a format-preserving TOML writer, so comments, key order, and spacing survive.
+
+When an install fails, Wally has already emptied the package tree, so packages unrelated to the call
+are gone from disk. Biskit rolls the `wally.toml` edit back so the manifest still reads as it did,
+and the error names which declared packages are now absent. Restoring them takes a successful
+`wally install`, which Biskit does not run on its own.
+
+Adding to the `server` or `dev` realm needs `wally.toml` to declare where shared packages live,
+because Wally refuses to link a server or dev package that depends on a shared one without it:
+
+```toml
+[place]
+shared-packages = "game.ReplicatedStorage.Packages"
+```
+
+The add result carries a note when that table is missing, since almost every non-trivial package has
+shared dependencies.
+
+The registry publishes no rate limits and enforces none of its own, so Biskit paces itself: requests
+go out one at a time, no closer together than `wally.min_request_interval_ms`, no more than
+`wally.max_requests_per_minute` in any rolling minute, and answers are reused for
+`wally.cache_ttl_seconds`. Nothing here checks for packages on its own — the tools answer when the
+agent is told to use them, and are otherwise idle.
+
+These tools are not registered in memory-only mode.
 
 ### Memories
 
@@ -240,6 +281,14 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `tools.max_reference_matches` | `200` | Cap on references from `find_referencing_symbols` |
 | `tools.symbol_cache` | `true` | Keep symbol trees across sessions, see below |
 | `tools.max_cached_symbol_files` | `4000` | Trees kept before the least used are dropped, 0 for no ceiling |
+| `wally.binary_path` | unset | Use this Wally executable instead of searching PATH |
+| `wally.registry_api_url` | `https://api.wally.run/` | Registry API, for a self-hosted registry |
+| `wally.request_timeout_ms` | `15000` | Ceiling on one registry request, 0 for no ceiling |
+| `wally.install_timeout_ms` | `300000` | Ceiling on one `wally install` run, 0 for no ceiling |
+| `wally.min_request_interval_ms` | `500` | Smallest gap between two registry requests |
+| `wally.max_requests_per_minute` | `60` | Registry requests per rolling minute, 0 to lift |
+| `wally.cache_ttl_seconds` | `300` | How long a registry answer is reused, 0 to disable |
+| `wally.max_search_results` | `25` | Default cap on `search_wally_packages` results |
 
 A structured result over `max_answer_chars` is refused with a message naming what to narrow. A text
 result, such as a memory, is cut instead and says how much was withheld.

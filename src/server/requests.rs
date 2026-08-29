@@ -351,6 +351,62 @@ pub struct RobloxApiRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchWallyPackagesRequest {
+    /// What to match. The registry searches scope, name, and description, so "promise" and
+    /// "evaera" both work.
+    pub query: String,
+    /// Cap on returned packages, 1 or more. Omit to take the wally.max_search_results default; 0 is
+    /// refused rather than returning nothing.
+    #[serde(default)]
+    pub max_results: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddWallyPackageRequest {
+    /// The package as "scope/name", such as "roblox/roact". A version may be written inline as
+    /// "scope/name@^1.4.2" instead of passing version.
+    pub package: String,
+    /// Semver requirement to pin, such as "^1.4.2". Omit to take the newest published release,
+    /// which costs one registry lookup. Prereleases are never chosen for you.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// "shared" for [dependencies], "server" for [server-dependencies], "dev" for
+    /// [dev-dependencies]. Defaults to "shared". "server" and "dev" need wally.toml to carry a
+    /// [place] shared-packages entry before Wally will install a package that depends on a shared
+    /// one, which most do.
+    #[serde(default)]
+    pub realm: Option<String>,
+    /// The name the package is required by, which is its name under Packages/. Defaults to the
+    /// package's own name in PascalCase: "roblox/roact" becomes "Roact".
+    #[serde(default)]
+    pub alias: Option<String>,
+    /// Replace an existing declaration of the same package instead of erroring. A package is
+    /// declared in one realm only, so this is also what moves one between realms.
+    #[serde(default)]
+    pub overwrite: bool,
+    /// Run `wally install` after editing wally.toml. On by default. Setting it false leaves the
+    /// manifest and the package tree disagreeing, which is only useful when adding several
+    /// packages before one install.
+    #[serde(default = "default_true")]
+    pub install: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RemoveWallyPackageRequest {
+    /// The package as "scope/name", or the alias it was declared under.
+    pub package: String,
+    /// Which section to remove it from: "shared", "server", or "dev". Leave it off in normal use:
+    /// add_wally_package keeps a package in one realm, so this is only for a hand written
+    /// wally.toml that declares the same name twice.
+    #[serde(default)]
+    pub realm: Option<String>,
+    /// Run `wally install` after editing wally.toml. On by default; without it the removed
+    /// package stays on disk.
+    #[serde(default = "default_true")]
+    pub install: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NoArguments {}
 
 fn project_root() -> String {

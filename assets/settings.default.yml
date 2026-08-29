@@ -172,3 +172,41 @@ tools:
   # How many symbol trees the index holds before the ones nothing has reached for
   # are dropped. Set to 0 to keep every file ever indexed.
   # max_cached_symbol_files: 4000
+
+wally:
+  # Biskit never installs Wally. The Wally tools look for a `wally` executable on
+  # PATH and refuse to answer when there is none, or when the one they find will
+  # not run. All four are also unregistered entirely in memory-only mode.
+
+  # Skip the PATH search and use this executable. Absolute path.
+  # binary_path: null
+
+  # The registry API. This is the `api` field of the package index's own
+  # config.json, not the index repository URL that wally.toml names. Change it
+  # only for a self-hosted registry. Must be https.
+  # registry_api_url: "https://api.wally.run/"
+
+  # Ceiling on one registry request, in milliseconds. 0 for no ceiling.
+  # request_timeout_ms: 15000
+
+  # Ceiling on one `wally install` run, in milliseconds. A cold install of a large
+  # dependency tree downloads every package, so leave room. 0 for no ceiling.
+  # install_timeout_ms: 300000
+
+  # The Wally registry publishes no rate limits and runs no limiter of its own, so
+  # these two are Biskit's own restraint rather than a limit anyone enforces.
+  # Requests are issued one at a time, never concurrently.
+
+  # Smallest gap between two registry requests, in milliseconds.
+  # min_request_interval_ms: 500
+
+  # Registry requests allowed in any rolling minute. 0 lifts the ceiling.
+  # max_requests_per_minute: 60
+
+  # How long a registry answer is reused before it is fetched again, in seconds.
+  # Repeating a search inside this window costs nothing. 0 disables the cache.
+  # cache_ttl_seconds: 300
+
+  # Default cap on results from search_wally_packages. The registry itself returns
+  # at most 100 matches for any query.
+  # max_search_results: 25
