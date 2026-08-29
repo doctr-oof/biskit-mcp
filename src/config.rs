@@ -13,6 +13,9 @@ pub const DEFAULT_TYPE_DEFINITIONS_URL: &str =
 pub const DEFAULT_ROBLOX_DOCS_URL: &str = "https://luau-lsp.pages.dev/api-docs/en-us.json";
 pub const DEFAULT_STANDARD_DOCS_URL: &str = "https://luau-lsp.pages.dev/api-docs/luau-en-us.json";
 
+/// The API the public wally-index points at, read from that index's own `config.json`.
+pub const DEFAULT_WALLY_REGISTRY_API: &str = "https://api.wally.run/";
+
 /// The first carpenter release whose language server resolves `shared("Name")`.
 pub const FIRST_SHARED_REQUIRE_VERSION: (u32, u32, u32) = (0, 2, 0);
 
@@ -57,6 +60,8 @@ pub struct Settings {
     pub project: ProjectSettings,
     #[serde(deserialize_with = "null_as_default")]
     pub tools: ToolSettings,
+    #[serde(deserialize_with = "null_as_default")]
+    pub wally: WallySettings,
 }
 
 fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -159,6 +164,45 @@ pub struct ToolSettings {
     pub symbol_cache: bool,
     /// Trees held before the least recently used are dropped.
     pub max_cached_symbol_files: usize,
+}
+
+/// How Biskit reaches the Wally CLI and the Wally registry.
+///
+/// The registry publishes no rate limits and enforces none of its own, so the pacing here is
+/// Biskit's own restraint rather than a limit anyone would return a 429 for.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WallySettings {
+    /// Skips the PATH search and uses this executable. Biskit never installs Wally.
+    pub binary_path: Option<PathBuf>,
+    pub registry_api_url: String,
+    /// Ceiling on one registry request, in milliseconds. 0 for no ceiling.
+    pub request_timeout_ms: u64,
+    /// Ceiling on one `wally install` run, in milliseconds. 0 for no ceiling.
+    pub install_timeout_ms: u64,
+    /// Smallest gap between two registry requests, in milliseconds.
+    pub min_request_interval_ms: u64,
+    /// Registry requests allowed in any rolling minute. 0 lifts the ceiling.
+    pub max_requests_per_minute: usize,
+    /// How long a registry answer is reused before it is asked for again. 0 disables the cache.
+    pub cache_ttl_seconds: u64,
+    /// Cap on results returned by search_wally_packages.
+    pub max_search_results: usize,
+}
+
+impl Default for WallySettings {
+    fn default() -> Self {
+        Self {
+            binary_path: None,
+            registry_api_url: DEFAULT_WALLY_REGISTRY_API.to_string(),
+            request_timeout_ms: 15_000,
+            install_timeout_ms: 300_000,
+            min_request_interval_ms: 500,
+            max_requests_per_minute: 60,
+            cache_ttl_seconds: 300,
+            max_search_results: 25,
+        }
+    }
 }
 
 impl Default for LspSettings {
