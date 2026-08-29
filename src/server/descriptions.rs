@@ -103,6 +103,29 @@ macro_rules! description {
          member's signature and docs, deprecation and its replacement, or an enum's items. Use \
          instead of recalling the Roblox API from memory."
     };
+    (list_wally_packages) => {
+        "Lists what wally.toml declares: each package's version requirement, which dependency \
+         section it sits in, the version wally.lock resolved it to, and whether requires into it \
+         resolve on disk. Reads files only, so it costs no registry request. Call before assuming \
+         a package is available to require."
+    };
+    (search_wally_packages) => {
+        "Searches the Wally registry by scope, name, and description, and reports each package's \
+         newest published version. Use to find the exact scope/name and version before \
+         add_wally_package, rather than recalling a package name from memory."
+    };
+    (add_wally_package) => {
+        "Declares a package in wally.toml and installs it. Omit version to pin the newest \
+         published release. Note that `wally install` deletes and rebuilds Packages, \
+         ServerPackages, and DevPackages in full, so this is never an additive operation; pass \
+         install: false to edit the manifest alone when adding several packages at once. A failed \
+         install rolls the wally.toml edit back and names what is missing from disk."
+    };
+    (remove_wally_package) => {
+        "Drops a package from wally.toml and rebuilds the package tree. Name it by scope/name or \
+         by the alias it was declared under. Check what still requires it first: removing a \
+         package nothing rebuilt yet leaves every require of it broken."
+    };
     (get_status) => {
         "Reports Biskit's state: project root, language server state, sourcemap freshness, memory \
          count, and non-default settings. Call when a tool returns nothing and you cannot tell \
