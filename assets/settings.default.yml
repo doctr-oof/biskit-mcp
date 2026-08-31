@@ -94,6 +94,14 @@ lsp:
   # reaching for one of them later reopens it. Set to 0 for no ceiling.
   # max_open_documents: 256
 
+  # Before diagnostics are read, tell the language server which project files have
+  # moved on disk since the last read. The server keeps its analysis of a file and
+  # of every file that requires it until it is told otherwise, so without this an
+  # edit to a dependency Biskit never opened is invisible to it and diagnostics are
+  # answered against the text it first read. Costs one project walk per diagnostics
+  # call. Turn off to trade that walk for stale results.
+  # sync_disk_changes: true
+
 project:
   # Extra paths excluded from every walk: find_file, list_dir, search_for_pattern,
   # and the project scan that find_symbol runs when given no relative_path.

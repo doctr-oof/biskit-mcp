@@ -60,9 +60,36 @@ enum Sync {
     Changed(i64),
 }
 
+/// The stamps every project source file carried when the server last saw it, so a later sweep can
+/// tell which files have moved underneath it.
+#[derive(Default)]
+struct KnownFiles {
+    seeded: bool,
+    stamps: HashMap<PathBuf, FileStamp>,
+}
+
+/// The files a sweep found to have moved, split by the event the server expects for each.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SyncPlan {
+    created: Vec<PathBuf>,
+    changed: Vec<PathBuf>,
+    removed: Vec<PathBuf>,
+}
+
+impl SyncPlan {
+    fn len(&self) -> usize {
+        self.created.len() + self.changed.len() + self.removed.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 pub struct Session {
     connection: LspConnection,
     documents: Mutex<OpenDocuments>,
+    known: Mutex<KnownFiles>,
     max_open_documents: usize,
     drain: JoinHandle<()>,
     sourcemap_watch: std::sync::Mutex<Option<JoinHandle<()>>>,
@@ -101,6 +128,7 @@ impl Session {
         let session = Arc::new(Self {
             connection,
             documents: Mutex::new(OpenDocuments::default()),
+            known: Mutex::new(KnownFiles::default()),
             max_open_documents: settings.lsp.max_open_documents,
             drain,
             sourcemap_watch: std::sync::Mutex::new(None),
@@ -205,9 +233,19 @@ impl Session {
 
     /// Makes sure the server holds the current text of `path`, and hands back that text.
     pub async fn ensure_open(&self, path: &Path) -> Result<OpenFile> {
+        self.open_document(path, false).await
+    }
+
+    /// Re-reads `path` even when its size and modification time are the ones already held, for the
+    /// edit that lands inside a single tick of the filesystem clock without changing the length.
+    pub async fn reload(&self, path: &Path) -> Result<OpenFile> {
+        self.open_document(path, true).await
+    }
+
+    async fn open_document(&self, path: &Path, force: bool) -> Result<OpenFile> {
         let stamp = file_stamp(path).await;
 
-        if stamp.is_some() {
+        if !force && stamp.is_some() {
             let mut documents = self.documents.lock().await;
             let touched = documents.tick();
             if let Some(open) = documents
@@ -333,6 +371,109 @@ impl Session {
                     path.display()
                 );
             }
+        }
+    }
+
+    /// Records where `files` stand right now without telling the server anything, so the first
+    /// sweep reports the edits made from here on rather than the whole project.
+    pub async fn seed_disk_stamps(&self, files: &[PathBuf]) {
+        let current = current_stamps(files).await;
+        let mut known = self.known.lock().await;
+        known.stamps = current.into_iter().collect();
+        known.seeded = true;
+    }
+
+    /// Forwards every file that has moved since the last sweep, and answers with how many were
+    /// reported.
+    ///
+    /// The server reads an open document from the text it was handed, so those go out as an edit;
+    /// the rest go out as watched-file events, which is what makes the server drop its cached
+    /// analysis of a file and of everything that requires it.
+    pub async fn sync_disk_changes(&self, files: &[PathBuf]) -> Result<usize> {
+        let current = current_stamps(files).await;
+
+        let mut plan = {
+            let mut known = self.known.lock().await;
+            let plan = match known.seeded {
+                true => plan_sync(&known.stamps, &current),
+                false => SyncPlan::default(),
+            };
+            known.stamps = current.into_iter().collect();
+            known.seeded = true;
+            plan
+        };
+
+        if plan.is_empty() {
+            return Ok(0);
+        }
+
+        for path in std::mem::take(&mut plan.removed) {
+            match file_stamp(&path).await {
+                Some(_) => plan.changed.push(path),
+                None => plan.removed.push(path),
+            }
+        }
+
+        self.report_disk_changes(plan).await
+    }
+
+    /// Sends the edits and the watched-file events a sweep asked for.
+    async fn report_disk_changes(&self, plan: SyncPlan) -> Result<usize> {
+        let reported = plan.len();
+        let mut events = Vec::with_capacity(reported);
+
+        for (paths, kind) in [(&plan.created, 1), (&plan.changed, 2), (&plan.removed, 3)] {
+            for path in paths {
+                let open = self.documents.lock().await.open.contains_key(path);
+                if open && kind != 3 {
+                    if let Err(error) = self.reload(path).await {
+                        tracing::warn!(
+                            target: "biskit::lsp",
+                            "failed to resend {}: {error}",
+                            path.display()
+                        );
+                    }
+                    continue;
+                }
+                if open {
+                    self.close(path).await;
+                }
+                let Ok(uri) = uri::from_path(path) else {
+                    continue;
+                };
+                events.push(json!({"uri": uri, "type": kind}));
+            }
+        }
+
+        if !events.is_empty() {
+            self.connection
+                .notify(
+                    "workspace/didChangeWatchedFiles",
+                    json!({"changes": events}),
+                )
+                .await?;
+        }
+        Ok(reported)
+    }
+
+    /// Drops a document the server is holding, for a file that is no longer on disk.
+    async fn close(&self, path: &Path) {
+        let Some(open) = self.documents.lock().await.open.remove(path) else {
+            return;
+        };
+        if let Err(error) = self
+            .connection
+            .notify(
+                "textDocument/didClose",
+                json!({"textDocument": {"uri": open.uri}}),
+            )
+            .await
+        {
+            tracing::warn!(
+                target: "biskit::lsp",
+                "failed to close {}: {error}",
+                path.display()
+            );
         }
     }
 
@@ -503,8 +644,52 @@ impl OpenDocument {
     }
 }
 
+/// Stamps a whole sweep's worth of files on one blocking thread, rather than handing every
+/// metadata call to the pool on its own.
+async fn current_stamps(files: &[PathBuf]) -> Vec<(PathBuf, FileStamp)> {
+    let files = files.to_vec();
+    tokio::task::spawn_blocking(move || {
+        files
+            .into_iter()
+            .filter_map(|path| {
+                let stamp = std::fs::metadata(&path).ok().and_then(stamp_of)?;
+                Some((path, stamp))
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+fn plan_sync(known: &HashMap<PathBuf, FileStamp>, current: &[(PathBuf, FileStamp)]) -> SyncPlan {
+    let mut plan = SyncPlan::default();
+
+    for (path, stamp) in current {
+        match known.get(path) {
+            Some(held) if held == stamp => {}
+            Some(_) => plan.changed.push(path.clone()),
+            None => plan.created.push(path.clone()),
+        }
+    }
+
+    let seen: std::collections::HashSet<&PathBuf> = current.iter().map(|(path, _)| path).collect();
+    for path in known.keys() {
+        if !seen.contains(path) {
+            plan.removed.push(path.clone());
+        }
+    }
+
+    plan.created.sort();
+    plan.changed.sort();
+    plan.removed.sort();
+    plan
+}
+
 async fn file_stamp(path: &Path) -> Option<FileStamp> {
-    let metadata = tokio::fs::metadata(path).await.ok()?;
+    stamp_of(tokio::fs::metadata(path).await.ok()?)
+}
+
+fn stamp_of(metadata: std::fs::Metadata) -> Option<FileStamp> {
     Some(FileStamp {
         modified: metadata.modified().ok()?,
         len: metadata.len(),
@@ -609,4 +794,73 @@ fn spawn_sourcemap_watch(
 async fn modified_at(path: &Path) -> Option<(std::time::SystemTime, u64)> {
     let metadata = tokio::fs::metadata(path).await.ok()?;
     Some((metadata.modified().ok()?, metadata.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stamp(seconds: u64, len: u64) -> FileStamp {
+        FileStamp {
+            modified: std::time::UNIX_EPOCH + Duration::from_secs(seconds),
+            len,
+        }
+    }
+
+    fn known(entries: &[(&str, FileStamp)]) -> HashMap<PathBuf, FileStamp> {
+        entries
+            .iter()
+            .map(|(path, stamp)| (PathBuf::from(path), *stamp))
+            .collect()
+    }
+
+    fn current(entries: &[(&str, FileStamp)]) -> Vec<(PathBuf, FileStamp)> {
+        entries
+            .iter()
+            .map(|(path, stamp)| (PathBuf::from(path), *stamp))
+            .collect()
+    }
+
+    fn paths(entries: &[&str]) -> Vec<PathBuf> {
+        entries.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn a_file_that_has_not_moved_is_not_reported() {
+        let plan = plan_sync(
+            &known(&[("A.luau", stamp(1, 10))]),
+            &current(&[("A.luau", stamp(1, 10))]),
+        );
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn every_kind_of_move_lands_in_its_own_bucket() {
+        let plan = plan_sync(
+            &known(&[
+                ("A.luau", stamp(1, 10)),
+                ("B.luau", stamp(1, 10)),
+                ("C.luau", stamp(1, 10)),
+            ]),
+            &current(&[
+                ("A.luau", stamp(1, 10)),
+                ("B.luau", stamp(2, 10)),
+                ("D.luau", stamp(1, 10)),
+            ]),
+        );
+
+        assert_eq!(plan.changed, paths(&["B.luau"]));
+        assert_eq!(plan.created, paths(&["D.luau"]));
+        assert_eq!(plan.removed, paths(&["C.luau"]));
+        assert_eq!(plan.len(), 3);
+    }
+
+    #[test]
+    fn an_edit_that_keeps_the_length_is_still_a_move() {
+        let plan = plan_sync(
+            &known(&[("A.luau", stamp(1, 10))]),
+            &current(&[("A.luau", stamp(2, 10))]),
+        );
+        assert_eq!(plan.changed, paths(&["A.luau"]));
+    }
 }

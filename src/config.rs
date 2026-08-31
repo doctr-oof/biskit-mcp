@@ -102,6 +102,8 @@ pub struct LspSettings {
     pub diagnostics_settle_ms: u64,
     /// Documents held open in the language server before the least recently used are closed.
     pub max_open_documents: usize,
+    /// Reports the files that moved on disk to the language server before diagnostics are read.
+    pub sync_disk_changes: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -229,6 +231,7 @@ impl Default for LspSettings {
             request_timeout_ms: 30_000,
             diagnostics_settle_ms: 1_500,
             max_open_documents: 256,
+            sync_disk_changes: true,
         }
     }
 }
