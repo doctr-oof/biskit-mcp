@@ -190,6 +190,20 @@ Biskit watches that file and tells the language server when it changes, so a reg
 takes effect without a restart. Set `lsp.watch_sourcemap: false` to disable the watcher, or
 `lsp.sourcemap: null` to turn sourcemap loading off entirely.
 
+## Stale diagnostics
+
+The language server keeps its analysis of a file, and of every file that requires it, until it is
+told the file moved. Editors send it those notices; an agent editing files through some other tool
+does not. Biskit closes that gap itself: before it reads diagnostics it walks the project, compares
+every source file against the stamps it recorded on the last read, and reports what moved, so a
+long editing session cannot leave `get_file_diagnostics` answering against text that was replaced
+several edits ago. Set `lsp.sync_disk_changes: false` to trade that walk for stale results.
+
+The stamp is a file's size plus its modification time, which an edit landing inside one tick of the
+filesystem clock without changing the length can slip past. Pass `refresh: true` to
+`get_file_diagnostics` or `get_symbol_diagnostics` to re-read the named file regardless of its
+stamp.
+
 ## Tools
 
 These are all of the tools Biskit provides your agent. You can exclude them via the `tools.excluded` configuration.
@@ -272,6 +286,7 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 | `lsp.sourcemap` | `sourcemap.json` | Rojo sourcemap path, or null to disable |
 | `lsp.server_settings` | empty | Raw luau-lsp settings in VS Code dotted-key form |
 | `lsp.max_open_documents` | `256` | Files kept open in the language server before the least recently used are closed, 0 for no ceiling |
+| `lsp.sync_disk_changes` | `true` | Report the files that moved on disk to the language server before diagnostics are read, so its cached analysis of a dependency is dropped. Costs one project walk per diagnostics call |
 | `project.ignored_paths` | empty | Extra gitignore-style exclusions, matched against the project root on every walk and forwarded to luau-lsp |
 | `project.respect_gitignore` | `true` | Honour `.gitignore` when walking the project. Files the sourcemap names are scanned either way |
 | `project.memory_only` | `false` | Run without the language server, see below |
