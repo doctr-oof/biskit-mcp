@@ -6,7 +6,7 @@ use serde::Serialize;
 use super::{SymbolQuery, check_line_range};
 use crate::lines::LineIndex;
 use crate::lsp::protocol::{Diagnostic, Severity};
-use crate::lsp::session::ensure_luau_file;
+use crate::lsp::session::{Session, ensure_luau_file};
 use crate::lsp::symbols::SymbolNode;
 use crate::lsp::uri;
 
@@ -38,12 +38,38 @@ impl<'a> SymbolQuery<'a> {
         start_line: Option<u32>,
         end_line: Option<u32>,
         min_severity: Severity,
+        refresh: bool,
+    ) -> Result<GroupedDiagnostics> {
+        let session = self.handle.session().await?;
+        self.handle.sync_disk_changes(&session).await;
+        self.diagnostics_of(
+            &session,
+            relative_path,
+            start_line,
+            end_line,
+            min_severity,
+            refresh,
+        )
+        .await
+    }
+
+    /// Reads one file's diagnostics from a server that has already been told what moved on disk.
+    async fn diagnostics_of(
+        &self,
+        session: &Session,
+        relative_path: &str,
+        start_line: Option<u32>,
+        end_line: Option<u32>,
+        min_severity: Severity,
+        refresh: bool,
     ) -> Result<GroupedDiagnostics> {
         let path = self.project().resolve(relative_path)?;
         ensure_luau_file(&path)?;
 
-        let session = self.handle.session().await?;
-        let file = session.ensure_open(&path).await?;
+        let file = match refresh {
+            true => session.reload(&path).await?,
+            false => session.ensure_open(&path).await?,
+        };
         check_line_range(
             relative_path,
             &LineIndex::new(&file.content),
@@ -54,7 +80,7 @@ impl<'a> SymbolQuery<'a> {
         let diagnostics = session.diagnostics(&path).await?;
         let symbols = self
             .handle
-            .document_symbols(&session, &path)
+            .document_symbols(session, &path)
             .await
             .map(|(symbols, _)| symbols)
             .unwrap_or_default();
@@ -83,25 +109,29 @@ impl<'a> SymbolQuery<'a> {
         relative_path: &str,
         check_references: bool,
         min_severity: Severity,
+        refresh: bool,
     ) -> Result<GroupedDiagnostics> {
         let session = self.handle.session().await?;
+        self.handle.sync_disk_changes(&session).await;
         let (path, symbol, position) = self.locate_one(&session, name_path, relative_path).await?;
 
         if !check_references {
             let file = session.ensure_open(&path).await?;
             let lines = LineIndex::new(&file.content);
             return self
-                .file_diagnostics(
+                .diagnostics_of(
+                    &session,
                     relative_path,
                     Some(lines.clamp_line(symbol.range.start.line as usize) as u32 + 1),
                     Some(lines.clamp_line(symbol.range.end.line as usize) as u32 + 1),
                     min_severity,
+                    refresh,
                 )
                 .await;
         }
 
         let mut grouped = self
-            .file_diagnostics(relative_path, None, None, min_severity)
+            .diagnostics_of(&session, relative_path, None, None, min_severity, refresh)
             .await?;
 
         let locations = session.references(&path, position, false).await?;
@@ -118,7 +148,7 @@ impl<'a> SymbolQuery<'a> {
                 continue;
             };
             let Ok(referencing) = self
-                .file_diagnostics(&relative, None, None, min_severity)
+                .diagnostics_of(&session, &relative, None, None, min_severity, refresh)
                 .await
             else {
                 continue;

@@ -208,6 +208,10 @@ pub struct FileDiagnosticsRequest {
     /// 1 error, 2 warning, 3 information, 4 hint. Defaults to 2.
     #[serde(default)]
     pub min_severity: Option<u32>,
+    /// Re-read the file even when its size and modification time say it has not moved. Only worth
+    /// setting when an edit that kept the file's length appears to have been missed.
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -221,6 +225,10 @@ pub struct SymbolDiagnosticsRequest {
     /// 1 error, 2 warning, 3 information, 4 hint. Defaults to 2.
     #[serde(default)]
     pub min_severity: Option<u32>,
+    /// Re-read the files even when their size and modification time say they have not moved. Only
+    /// worth setting when an edit that kept a file's length appears to have been missed.
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

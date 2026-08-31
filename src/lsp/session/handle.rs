@@ -115,6 +115,15 @@ impl LanguageServerHandle {
 
         let started = Instant::now();
         let session = Session::start(&self.project, &self.settings).await?;
+        if self.settings.lsp.sync_disk_changes {
+            match self.resolve_luau_files(None).await {
+                Ok(files) => session.seed_disk_stamps(&files).await,
+                Err(error) => tracing::warn!(
+                    target: "biskit::lsp",
+                    "disk sweep baseline could not be taken, the first sweep will take it: {error}"
+                ),
+            }
+        }
         tracing::info!(
             target: "biskit::lsp",
             "language server ready in {}ms",
@@ -122,6 +131,34 @@ impl LanguageServerHandle {
         );
         *guard = Some(Arc::clone(&session));
         Ok(session)
+    }
+
+    /// Hands the server every file that has moved on disk since the last sweep.
+    ///
+    /// Without this the server answers a query about one file from the text it last read of that
+    /// file's dependencies, which is whatever was on disk the first time it reached for them.
+    pub async fn sync_disk_changes(&self, session: &Session) {
+        if !self.settings.lsp.sync_disk_changes {
+            return;
+        }
+
+        let files = match self.resolve_luau_files(None).await {
+            Ok(files) => files,
+            Err(error) => {
+                tracing::warn!(target: "biskit::lsp", "disk sweep skipped: {error}");
+                return;
+            }
+        };
+
+        match session.sync_disk_changes(&files).await {
+            Ok(0) => {}
+            Ok(reported) => {
+                tracing::debug!(target: "biskit::lsp", "disk sweep reported {reported} files");
+            }
+            Err(error) => {
+                tracing::warn!(target: "biskit::lsp", "disk sweep failed: {error}");
+            }
+        }
     }
 
     /// Starts the language server in the background so the first tool call does not pay for it.

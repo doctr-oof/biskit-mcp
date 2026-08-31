@@ -463,6 +463,7 @@ impl Biskit {
                     request.start_line,
                     request.end_line,
                     severity,
+                    request.refresh,
                 )
                 .await
                 .map_err(fail("get_file_diagnostics"))?,
@@ -486,6 +487,7 @@ impl Biskit {
                     &request.relative_path,
                     request.check_symbol_references,
                     severity,
+                    request.refresh,
                 )
                 .await
                 .map_err(fail("get_symbol_diagnostics"))?,
