@@ -11,7 +11,7 @@ use biskit_mcp::memory::MemoryStore;
 use biskit_mcp::project::Project;
 use biskit_mcp::server::Biskit;
 use biskit_mcp::setup::{Client, HooksTarget};
-use biskit_mcp::{lsp, project, prompts, setup, upgrade};
+use biskit_mcp::{lsp, project, prompts, session_start, setup, upgrade};
 
 const PROJECT_ENV: &str = "BISKIT_PROJECT";
 
@@ -297,6 +297,14 @@ fn bootstrap_on_startup(project: &Project, root_source: &str) {
             created.join(", ")
         );
     }
+
+    if report.updated_gitignore {
+        tracing::info!(
+            target: "biskit",
+            "added the cache entry to {}",
+            biskit.join(".gitignore").display()
+        );
+    }
 }
 
 fn run_init(request: RootRequest) -> Result<()> {
@@ -455,7 +463,7 @@ fn run_cache_clear(request: RootRequest) -> Result<()> {
 fn run_session_start_hook(request: RootRequest) -> Result<()> {
     let opened = open_project(request)?;
     let memory_only = opened.settings.project.memory_only;
-    let memories = MemoryStore::new(opened.project).list()?;
+    let memories = MemoryStore::new(opened.project.clone()).list()?;
 
     let payload = serde_json::json!({
         "hookSpecificOutput": {
@@ -464,5 +472,12 @@ fn run_session_start_hook(request: RootRequest) -> Result<()> {
         }
     });
     println!("{payload}");
+
+    if let Err(error) = session_start::record_delivery(&opened.project) {
+        eprintln!(
+            "biskit: could not record the session-start delivery ({error}); \
+             initial_instructions will answer with the full manual"
+        );
+    }
     Ok(())
 }
