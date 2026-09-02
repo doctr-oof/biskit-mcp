@@ -11,7 +11,7 @@ Writes a markdown memory file, refusing an existing name unless `overwrite` is s
 ## Implementation
 - Handler: `src/server/mod.rs:225-242`. Calls `MemoryStore::create(name, content, overwrite)`, then renders `Wrote memory <name>.` or `Replaced memory <name>.` depending on `CreateOutcome::replaced`.
 - `MemoryStore::create` (`src/memory.rs:80-100`): resolves the path, records whether it already existed, errors when it exists and `overwrite` is false, calls `Project::bootstrap()`, creates the parent directories, then `std::fs::write`.
-- `bootstrap` (`src/project.rs:62-88`) is why creating the first memory in a fresh project also creates `.biskit/`, `.biskit/memories/`, `.biskit/.gitignore` (containing `settings.local.yml`), `.biskit/settings.yml`, and `.biskit/settings.local.yml`. Existing files are left untouched.
+- `bootstrap` (`src/project.rs:63-92`) is why creating the first memory in a fresh project also creates `.biskit/`, `.biskit/memories/`, `.biskit/.gitignore` (containing `settings.local.yml` and `cache/`), `.biskit/settings.yml`, and `.biskit/settings.local.yml`. Existing files are left untouched, with one exception: a `.gitignore` written before the `cache/` entry existed has that line appended, preserving whatever else is in it (`with_cache_entry`, `src/project.rs:237-253`, reported as `BootstrapReport::updated_gitignore`).
 - Name normalisation is `stem()` — trim, strip surrounding `/`, drop a trailing `.md` — so `create_memory` with `notes.md` and with `notes` target the same file. Nesting `/` segments become real directories under `.biskit/memories`.
 - The content is written byte for byte. No frontmatter, no timestamp, no trailing newline is added.
 
