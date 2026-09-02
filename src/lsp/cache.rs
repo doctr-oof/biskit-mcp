@@ -12,7 +12,6 @@ use crate::project::Project;
 
 pub const CACHE_DIR: &str = "cache";
 const INDEX_FILE: &str = "symbols.json";
-const GITIGNORE_CONTENTS: &str = "*\n";
 
 const FORMAT_VERSION: u32 = 1;
 
@@ -245,17 +244,17 @@ fn read_index(file: &Path, root: &Path) -> Option<Index> {
     Some(index)
 }
 
+/// Creates a cache directory. Its contents are kept out of version control by the `cache/` entry
+/// in the `.biskit` ignore file that `Project::bootstrap` writes.
+pub fn prepare_dir(directory: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory)
+}
+
 fn write_index(file: &Path, payload: &[u8]) -> Result<()> {
     let directory = file
         .parent()
         .context("the symbol index has no parent directory")?;
-    std::fs::create_dir_all(directory)
-        .with_context(|| format!("failed to create {}", directory.display()))?;
-
-    let gitignore = directory.join(".gitignore");
-    if !gitignore.exists() {
-        let _ = std::fs::write(&gitignore, GITIGNORE_CONTENTS);
-    }
+    prepare_dir(directory).with_context(|| format!("failed to create {}", directory.display()))?;
 
     let temporary = directory.join("symbols.json.writing");
     std::fs::write(&temporary, payload)
@@ -474,21 +473,6 @@ mod tests {
         assert!(SymbolCache::clear(&fixture.project).unwrap());
         assert!(!cache_dir(&fixture.project).exists());
         assert!(!SymbolCache::clear(&fixture.project).unwrap());
-    }
-
-    #[test]
-    fn the_written_index_is_gitignored() {
-        let fixture = Fixture::build();
-        let stamp = fixture.stamp("Module.luau");
-
-        runtime().block_on(async {
-            let cache = SymbolCache::new(&fixture.project, &settings());
-            cache.put("Module.luau", stamp, &tree("update")).await;
-            cache.flush().await;
-        });
-
-        let gitignore = cache_dir(&fixture.project).join(".gitignore");
-        assert_eq!(std::fs::read_to_string(gitignore).unwrap(), "*\n");
     }
 
     #[test]

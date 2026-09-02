@@ -417,6 +417,14 @@ pub struct RemoveWallyPackageRequest {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NoArguments {}
 
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct InitialInstructionsRequest {
+    /// Send the manual even when a SessionStart hook already delivered it. Only set this when the
+    /// manual is genuinely absent from your context.
+    #[serde(default)]
+    pub force: bool,
+}
+
 fn project_root() -> String {
     ".".to_string()
 }
