@@ -9,6 +9,7 @@ pub mod prompts;
 pub mod roblox;
 pub(crate) mod serde_skip;
 pub mod server;
+pub mod session_start;
 pub mod setup;
 pub(crate) mod status;
 pub mod upgrade;

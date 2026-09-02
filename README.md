@@ -315,9 +315,7 @@ the literal prefilter, through a single stdio pipe, every session from cold. Alm
 files changed since the last session asked about them.
 
 Biskit stores the trees in `.biskit/cache/symbols.json`, keyed by each file's path, size, and
-modification time, and answers from the index when all three still match. The directory writes its
-own `.gitignore`, so nothing in it is ever committed. A file that has been edited, or deleted since
-it was indexed, is never answered from the index.
+modification time, and answers from the index when all three still match.
 
 Clear it with `biskit-mcp cache clear`, or turn it off with `tools.symbol_cache: false`.
 

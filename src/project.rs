@@ -12,7 +12,8 @@ pub const MEMORIES_DIR: &str = "memories";
 pub const SETTINGS_FILE: &str = "settings.yml";
 pub const LOCAL_SETTINGS_FILE: &str = "settings.local.yml";
 
-const GITIGNORE_CONTENTS: &str = "settings.local.yml\n";
+const GITIGNORE_CONTENTS: &str = "settings.local.yml\ncache/\n";
+const GITIGNORE_CACHE_ENTRY: &str = "cache/";
 
 const RELATIVE_PATH_HINT: &str = "pass a path relative to the project root, such as \
                                   \"src/init.luau\", or \".\" for the root";
@@ -70,6 +71,9 @@ impl Project {
         if !gitignore.exists() {
             std::fs::write(&gitignore, GITIGNORE_CONTENTS)?;
             report.created_gitignore = true;
+        } else if let Some(topped_up) = with_cache_entry(&std::fs::read_to_string(&gitignore)?) {
+            std::fs::write(&gitignore, topped_up)?;
+            report.updated_gitignore = true;
         }
 
         let settings = self.settings_path();
@@ -229,10 +233,30 @@ pub fn normalize_separators(path: &Path) -> String {
         .join("/")
 }
 
+/// The cache directory used to carry its own `.gitignore`; projects bootstrapped before that
+/// moved into the `.biskit` ignore file need the entry added without losing their own edits.
+fn with_cache_entry(existing: &str) -> Option<String> {
+    if existing
+        .lines()
+        .any(|line| line.trim() == GITIGNORE_CACHE_ENTRY)
+    {
+        return None;
+    }
+
+    let mut updated = existing.to_owned();
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(GITIGNORE_CACHE_ENTRY);
+    updated.push('\n');
+    Some(updated)
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BootstrapReport {
     pub created_biskit_dir: bool,
     pub created_gitignore: bool,
+    pub updated_gitignore: bool,
     pub created_settings: bool,
     pub created_local_settings: bool,
 }
@@ -327,6 +351,25 @@ mod tests {
             std::fs::read_to_string(project.local_settings_path()).unwrap(),
             edited
         );
+    }
+
+    #[test]
+    fn bootstrap_adds_the_cache_entry_to_an_older_gitignore_without_losing_its_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project::open(dir.path()).unwrap();
+        std::fs::create_dir_all(project.biskit_dir()).unwrap();
+        let gitignore = project.biskit_dir().join(".gitignore");
+        std::fs::write(&gitignore, "settings.local.yml\nnotes.md\n").unwrap();
+
+        let report = project.bootstrap().unwrap();
+
+        assert!(report.updated_gitignore);
+        assert_eq!(
+            std::fs::read_to_string(&gitignore).unwrap(),
+            "settings.local.yml\nnotes.md\ncache/\n"
+        );
+
+        assert!(!project.bootstrap().unwrap().updated_gitignore);
     }
 
     #[test]
