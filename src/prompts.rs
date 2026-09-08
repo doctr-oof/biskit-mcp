@@ -114,6 +114,43 @@ pub fn initial_instructions(memories: &[String], memory_only: bool) -> String {
 mod tests {
     use super::*;
 
+    fn section_sizes(manual: &str) -> Vec<(String, usize)> {
+        let mut sizes = Vec::new();
+        let mut rest = manual;
+        while let Some(start) = rest.find("<Section name=\"") {
+            let after = &rest[start + "<Section name=\"".len()..];
+            let name_end = after.find('"').unwrap_or(0);
+            let name = after[..name_end].to_string();
+            let end = rest[start..]
+                .find("</Section>")
+                .map(|offset| start + offset + "</Section>".len())
+                .unwrap_or(rest.len());
+            sizes.push((name, end - start));
+            rest = &rest[end..];
+        }
+        sizes
+    }
+
+    fn report(label: &str, manual: &str) -> usize {
+        let sections = section_sizes(manual);
+        let total = manual.len();
+        println!("{label}: {total} bytes, ~{} tokens", total / 4);
+        for (name, bytes) in &sections {
+            println!(
+                "  {name:<32} {bytes:>6} bytes  ~{:>5} tokens  {:>3}%",
+                bytes / 4,
+                bytes * 100 / total
+            );
+        }
+        sections.len()
+    }
+
+    #[test]
+    fn manual_size_report() {
+        assert!(report("instructions.md", INSTRUCTIONS_MANUAL) > 0);
+        assert!(report("instructions.memory-only.md", MEMORY_ONLY_INSTRUCTIONS_MANUAL) > 0);
+    }
+
     #[test]
     fn undelivered_connection_instructions_demand_the_tool_call() {
         for memory_only in [false, true] {
