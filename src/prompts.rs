@@ -148,7 +148,12 @@ mod tests {
     #[test]
     fn manual_size_report() {
         assert!(report("instructions.md", INSTRUCTIONS_MANUAL) > 0);
-        assert!(report("instructions.memory-only.md", MEMORY_ONLY_INSTRUCTIONS_MANUAL) > 0);
+        assert!(
+            report(
+                "instructions.memory-only.md",
+                MEMORY_ONLY_INSTRUCTIONS_MANUAL
+            ) > 0
+        );
     }
 
     #[test]
