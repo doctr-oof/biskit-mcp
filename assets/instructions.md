@@ -2,40 +2,23 @@
 
 <Main name="BiskitInstructionsManual">
 <Section name="WhatBiskitIs" desc="Identity and hard boundary. Read first.">
-    Biskit = symbolic code-intelligence and project-memory server for this Luau project.
+    Biskit = symbolic code-intelligence and project-memory server for this Luau project. Symbol
+    lookup, references, and diagnostics come from the real language server, not text search.
+    Memories are durable curated notes that survive between sessions.
 
     <Rule>Use own native write tools for all edits.</Rule>
-
-    <Responsibility name="ProjectMemory">
-        Durable curated notes about project, survive between sessions.
-    </Responsibility>
-
-    <Responsibility name="LuauCodeIntelligence">
-        Symbol lookup, references, diagnostics from real language server, not text search.
-    </Responsibility>
 </Section>
 
 <Section name="SessionStart" desc="Mandatory, no exceptions. Runs before any other work.">
     <Behavior name="CheckMemoryFirst">
-        Check project memory before you do anything else. Before you answer a question, open a file,
-        run a search, or plan an approach. This is a requirement, not a suggestion, and it applies to
-        every session without exception — including short tasks and projects you believe you already
-        understand.
+        Check project memory before you do anything else: before you answer a question, open a
+        file, run a search, or plan an approach. Every session, including short tasks and projects
+        you believe you already understand.
 
         1. Read the memory index in `AvailableMemories` below. It is names only.
         2. Call `read_memory` on every name that plausibly relates to the task. When unsure whether a
            memory is relevant, read it.
         3. Only then begin the work.
-
-        You do not know what is in this project's memory until you look.
-    </Behavior>
-
-    <Behavior name="WhySkippingCosts">
-        Skipping this step is the most expensive mistake you can make here. Memories exist because
-        that context does not survive between sessions: architectural decisions, invariants that look
-        arbitrary until explained, workarounds with reasons behind them. Work started without them
-        re-derives what was already settled, contradicts constraints nobody told you about, and
-        produces changes the human has to reject.
     </Behavior>
 
     <Rule>"None look relevant" is a conclusion you may reach only after reading the list, never before it.</Rule>
@@ -71,409 +54,224 @@
     <Tool name="get_status" use="Work out why a tool returned nothing" />
 
     <Rule>
-        Prefer symbolic tools over whole files. Reading 900-line module for one function burn context
-        rest of task need. `get_symbols_overview` then targeted `find_symbol` almost always cheaper.
-    </Rule>
-
-    <Rule>
-        `search_for_pattern` = right tool for non-symbol text: string literals, comments, config
-        keys, remote event names. Wrong tool for finding function definition — use `find_symbol`.
+        Prefer symbolic tools over whole files. `get_symbols_overview` then targeted `find_symbol`
+        almost always cheaper than reading a module for one function.
     </Rule>
 </Section>
 
-<Section name="NamePaths" desc="How symbols are addressed, and the shape of what comes back.">
-    <Topic name="Syntax">
-        Symbols addressed by name path: separated chain of enclosing symbol names. `/`, `.`, and `:`
-        all work as separator, so write name the way it appear in source.
-
-        - `update` matches any symbol named `update` at any depth.
-        - `PlayerService/update` matches `update` nested directly inside `PlayerService`.
-        - `PlayerService.update` and `PlayerService:update` same thing.
-        - `/PlayerService` matches only top-level `PlayerService`, not nested one.
-        - `/PlayerService/update` fully absolute.
-
-        Method declared `function PlayerUtils:GetPlayerMaid()` addressable as `GetPlayerMaid`,
-        `PlayerUtils:GetPlayerMaid`, or `PlayerUtils/GetPlayerMaid`. Owner name not required.
-
-        Set `substring_matching: true` to match final segment loosely when you know only part of name.
-    </Topic>
-
+<Section name="NamePaths" desc="The shape of what symbol tools give back.">
     <Topic name="DuplicateNames">
-        When file has two symbols of same name, `get_symbols_overview` labels them `UserInfo[0]` and
-        `UserInfo[1]`. Pass label back verbatim to address exactly one. Bare `UserInfo` matches both.
-        Tools taking single symbol (`find_declaration`, `find_referencing_symbols`,
-        `get_symbol_diagnostics`) error on ambiguous name — use indexed form there.
+        When a file has two symbols of the same name, `get_symbols_overview` labels them
+        `UserInfo[0]` and `UserInfo[1]`. Bare `UserInfo` matches both; tools that take a single
+        symbol error on it, so pass the indexed label back verbatim there.
     </Topic>
 
     <Topic name="Truncation">
-        `find_symbol` returns `{ symbols, truncated }`. `truncated: true` means `max_matches` cut
-        result short: narrow with `relative_path` or raise cap. Field omitted entirely when nothing
-        was cut, so absent = complete. Same for `list_dir` and `search_for_pattern`, and
-        `search_for_pattern` adds `note` naming what the cut left out.
-    </Topic>
-
-    <Topic name="SymbolKinds">
-        `include_kinds` and `exclude_kinds` take LSP SymbolKind numbers: 1 File, 2 Module, 3
-        Namespace, 4 Package, 5 Class, 6 Method, 7 Property, 8 Field, 9 Constructor, 10 Enum, 11
-        Interface, 12 Function, 13 Variable, 14 Constant, 15 String, 16 Number, 17 Boolean, 18 Array,
-        19 Object, 20 Key, 21 Null, 22 EnumMember, 23 Struct, 24 Event, 25 Operator, 26
-        TypeParameter. Number outside 1–26 is refused rather than matching nothing.
+        `truncated: true` on `find_symbol`, `find_referencing_symbols`, `list_dir`, or
+        `search_for_pattern` means a cap cut the answer short: narrow with `relative_path` or raise
+        the cap. The field is omitted when nothing was cut, so absent = complete. A `note` names
+        what the cut left out where the tool carries one.
     </Topic>
 
     <Topic name="ResultShape">
-        `symbols` is keyed by file path, and each symbol under it carries no path of its own — path
-        comes from key it sits under. `find_declaration` returns same file-keyed shape.
-        `get_symbols_overview` returns `{ symbols, note }`; its `symbols` is bare list, since you
-        supplied file yourself.
+        `symbols` and `references` are keyed by file path; each entry under a key carries no path
+        of its own. `find_declaration` uses the same file-keyed shape. `get_symbols_overview`
+        returns `{ symbols, note }` with a bare list, since you supplied the file.
 
-        Top-level symbol in result carries full name path. Nested symbol under `children` carries
-        only own leaf name, because ancestry already spelled by chain it sits under. Join with `/` to
-        address it: child `update` under `PlayerService` is `PlayerService/update`.
+        A top-level symbol carries its full name path. A nested symbol under `children` carries
+        only its leaf name; join with `/` to address it: child `update` under `PlayerService` is
+        `PlayerService/update`.
+
+        `omitted_children: 2` = two locals hidden, not none; `include_locals: true` shows them.
     </Topic>
 
     <Topic name="DirectoryListings">
-        `list_dir` returns `{ base, directories, files }`. `base` is directory you listed; every
-        entry named relative to it. Join with `/` to get project-relative path: `base:
-        "src/Services"` plus entry `PlayerService.luau` is `src/Services/PlayerService.luau`.
-        `find_file` and `search_for_pattern` still answer with full project-relative paths.
+        `list_dir` returns `{ base, directories, files }`, every entry relative to `base`. Join with
+        `/` for the project-relative path. `find_file` and `search_for_pattern` answer with full
+        project-relative paths.
     </Topic>
 
     <Topic name="IgnoreSet">
-        `list_dir`, `find_file`, and `search_for_pattern` all skip what the ignore set hides:
-        `.gitignore` while `project.respect_gitignore` on, plus `project.ignored_paths`. In Roblox
-        projects that usually means `Packages/`. Naming an ignored directory as `relative_path`
-        searches it anyway, which is how you reach vendored code deliberately. The sourcemap-backed
-        tools — `resolve_instance_path`, `get_require_graph`, `get_module_context` — ignore the
-        ignore set entirely: file rojo syncs into game is part of game.
-    </Topic>
-
-    <Topic name="DepthAndMembers">
-        Table members sit under owner in `children`, so `depth` controls how much of table you see.
-        `get_symbols_overview` defaults to `depth: 1`, which is owners plus their members; raise it
-        for tables inside tables. `find_symbol` defaults to `depth: 0` — match alone, no members.
-        Member nests only when owner itself declared in same file; member of table declared elsewhere
-        stays top-level.
-    </Topic>
-
-    <Topic name="Locals">
-        Variable declared inside function body is not member of anything, so traversal prunes it as
-        noise and reports count in `omitted_children`. Symbol with `omitted_children: 2` declares two
-        locals you cannot see, not none. Pass `include_locals: true` to `get_symbols_overview` or
-        `find_symbol` to get them, which is what makes `depth` map body of function rather than only
-        its members. Local is still addressable by name without flag: `find_symbol` on `cachedInfo`
-        finds it wherever it sits.
+        The sourcemap-backed tools — `resolve_instance_path`, `get_require_graph`,
+        `get_module_context` — ignore the ignore set entirely: a file rojo syncs into the game is
+        part of the game, `Packages/` included.
     </Topic>
 
     <Topic name="References">
-        `find_referencing_symbols` returns `{ references, truncated, note }`, `references` keyed by
-        file same way. Cap is `tools.max_reference_matches`, default 200; `truncated: true` means hit
-        it, so symbol has more call sites than you see.
-
-        Reference carrying `resolved_by: "text"` was found by scanning declaring file, not by
-        language server. luau-lsp types implicit `self` of colon-declared method as fresh generic
-        instead of owner, so `self:Method()` resolves to nothing and never reaches reference list;
-        private helper called only that way would otherwise report zero references and read as dead
-        code. Text-found reference is matched on symbol name alone, so confirm receiver before
-        treating one as call site. `note` appears only when answer carries one.
-
-        `find_referencing_symbols` snippet is reference line alone by default. Pass `context_lines:
-        1` or more when you need surrounding lines to judge how symbol used. Each extra line
-        multiplies across every reference, so raise only when line itself not enough.
-    </Topic>
-
-    <Topic name="Detail">
-        Type signatures omitted by default. Pass `include_detail: true` to `get_symbols_overview`,
-        `find_symbol`, or `find_declaration` when you actually need signature, not just where symbol
-        lives. `detail` is resolved signature, same source `explain_symbol` reads, so two tools agree
-        about one symbol. Each one costs language server a request; wide answer that runs out of
-        budget says so in `note`, and symbols past ceiling carry no `detail` at all.
+        A reference carrying `resolved_by: "text"` was found by scanning the declaring file, not by
+        the language server. luau-lsp types the implicit `self` of a colon-declared method as a
+        fresh generic, so `self:Method()` never reaches the language server's list; the text scan
+        keeps a helper called only that way from reading as dead code. It is matched on name
+        alone, so confirm the receiver before treating one as a call site.
     </Topic>
 
     <Topic name="AnswerSizeCeiling">
-        Every tool result has size ceiling, `tools.max_answer_chars`. Structured result over ceiling
-        refused outright with message naming what to narrow — half a JSON document unreadable. Text
-        result, such as memory, cut instead and says how much withheld.
+        Every result has a size ceiling, `tools.max_answer_chars`. A structured result over it is
+        refused with a message naming what to narrow; a text result, such as a memory, is cut and
+        says how much was withheld.
     </Topic>
 </Section>
 
 <Section name="TypesNotJustLocations" desc="Reading inferred types, declarations, and signatures.">
     <Topic name="DetailVersusExplain">
-        `find_symbol` `detail` and `explain_symbol` `signature` both report what type checker
-        inferred, so they agree. Reach for `explain_symbol` when you have one symbol and want
-        documentation with it, or when you can only point at line and column; reach for
-        `include_detail` when you are already listing symbols and want their types in same answer.
-        Either way, ask before you assume type: `local part = workspace:FindFirstChild("Thing")`
-        declares nothing and resolves to `Instance?`.
+        `find_symbol` `detail` and `explain_symbol` `signature` report the same inferred type.
+        Reach for `explain_symbol` for one symbol with its documentation, or when you can only
+        point at a line and column; reach for `include_detail` when already listing symbols. Ask
+        before you assume a type: `workspace:FindFirstChild("Thing")` resolves to `Instance?`.
 
-        Generic that luau-lsp inferred but signature never uses is stripped from both, because
-        implicit `self` of colon-declared method picks one up (`GetPlayerMaid<a>`) that source never
-        wrote. Generic signature does use is kept.
-    </Topic>
-
-    <Topic name="PointingAtASymbol">
-        Point at symbol two ways: `name_path` plus `relative_path`, or `line` plus `column`. Both
-        1-based, same numbers every Biskit result gives back. Use `line`/`column` for expression that
-        is not symbol — call site, table field, diagnostic location. Pass one or other, never both.
-
-        `line` past end of file and `column` past end of line are both refused, with the real length
-        in message. Nothing is silently clamped, so a position that answers is a position that was in
-        range.
+        A generic luau-lsp inferred but the signature never uses is stripped from both, because the
+        implicit `self` of a colon-declared method picks one up (`GetPlayerMaid<a>`) that source
+        never wrote.
     </Topic>
 
     <Topic name="ExplainSymbol">
-        Returns `signature` always, `documentation` only with `include_documentation: true`. Docs
-        verbose, so opt in when you need behavior, not when you need shape.
-
-        `name_path` names symbol at position, resolved through same lookup `find_declaration` makes,
-        so two tools agree about one position. `declared_in` set when that declaration lives in
-        another file. `containing_symbol` names symbol position sits inside, which is different
-        question. Declaration language server cannot place inside project leaves `name_path` absent
-        and says so in `note`.
+        `name_path` in the answer names the symbol at the position, resolved through the same
+        lookup `find_declaration` makes. `declared_in` is set when that declaration lives in
+        another file. `containing_symbol` names the symbol the position sits inside, a different
+        question. A declaration the language server cannot place inside the project leaves
+        `name_path` absent and says so in `note`.
     </Topic>
 
     <Topic name="FindDeclaration">
-        `find_declaration` takes `name_path` or `line`/`column`, same as `explain_symbol`.
-        `name_path` only resolves against symbols the named file itself declares, so it cannot start
-        from a call site — point `line`/`column` at the name in the call to follow symbol into file
-        that declares it. Result reports symbol's full range, not just its declaration line.
+        Result reports the symbol's full range, not just its declaration line.
     </Topic>
 
     <Topic name="GetTypeDefinition">
-        `get_type_definition` different question from `find_declaration`. `find_declaration` = where
-        this value declared. `get_type_definition` = where type declared, usually `export type` in
-        shared module. Beats grepping `export type`.
-
-        Aim `line`/`column` at type's own name, not at value: in `local config: PlayerConfig`, point
-        at `PlayerConfig`. Pointing at `config` returns nothing, because language server answers this
-        from type name. Value with no written annotation has no type declaration to find — use
-        `explain_symbol` there. `name_path` naming type declaration itself answers with that
-        declaration.
+        `find_declaration` = where this value is declared. `get_type_definition` = where its type
+        is declared. A value with no written annotation has no type declaration to find; use
+        `explain_symbol` there.
     </Topic>
 
     <Topic name="GetInlayHints">
-        `get_inlay_hints` = cheapest type view. Positions plus short labels over line range, no
-        bodies. Forty-line function becomes dozen strings. Use before pulling body with
-        `include_body`. Empty `hints` with `note` = no hints there, not failure.
+        Use before pulling a body with `include_body`. Empty `hints` with `note` = no hints there,
+        not failure.
     </Topic>
 
     <Topic name="GetSignatureHelp">
-        `get_signature_help` answers "what arguments does this take" without reading callee. Aim
-        `line`/`column` inside parentheses of call. Takes no `name_path`: declaration never sits
-        inside call's parentheses, so name path could never answer. Empty `signatures` carries
-        `note`; usual cause is
-        position outside parentheses, but luau-lsp also answers with nothing at some positions
-        genuinely inside call, among them receiver of `self:` method call. Note says so rather than
-        asserting one cause.
-
-        `label` and `parameters` are language server's own rendering of resolved call, passed through
-        unchanged. Where callee is variadic (`print`, `table.pack`, anything taking `...`), it has no
-        declared parameter names to render, and luau-lsp fills label from arguments at call site
-        instead. Parameter names you get back are then your own, not callee's. `active_parameter`
-        still tracks correctly. When callee is variadic, read its real signature with `explain_symbol`
-        or `query_roblox_api` on callee itself.
+        Empty `signatures` carries a `note`. Usual cause is a position outside the parentheses, but
+        luau-lsp also answers nothing at some positions genuinely inside a call, among them the
+        receiver of a `self:` method call. For a variadic callee the parameter names in `label` are
+        your own arguments, not the callee's; read its real signature with `explain_symbol` or
+        `query_roblox_api` on the callee itself. `active_parameter` still tracks correctly.
     </Topic>
 </Section>
 
-<Section name="RobloxNotJustLuau" desc="This project is a game, not a folder of scripts.">
-    Where a file lands in the DataModel decides whether its code runs on server, client, or both, and
-    no type checker will tell you when you got that wrong.
-
+<Section name="RobloxNotJustLuau" desc="Where a file lands in the DataModel decides where its code runs.">
     <Topic name="GetModuleContext">
-        `get_module_context` is the call to make when you open unfamiliar module. One call returns
-        instance path, `class_name`, owning service, `role` (`server`, `client`, `shared`,
-        `unknown`), direct requires, direct dependents, public surface, diagnostic counts. Replaces
-        four to six separate calls. Start here, then narrow.
+        Start here on an unfamiliar module, then narrow. One call returns instance path,
+        `class_name`, owning service, `role` (`server`, `client`, `shared`, `unknown`), direct
+        requires, direct dependents, public surface, diagnostic counts.
 
-        `role` reads `class_name` first and service only after it, because `Script` runs on server
-        and `LocalScript` on client wherever they sit. `ModuleScript` takes role from its service.
-        Rojo sourcemaps carry no RunContext, so `Script` placed for client RunContext still reads as
-        `server` — `class_name` is in the answer, so check it when that matters.
+        `role` reads `class_name` first and service after: `Script` runs on server and
+        `LocalScript` on client wherever they sit; `ModuleScript` takes role from its service. Rojo
+        sourcemaps carry no RunContext, so a `Script` placed for client RunContext still reads as
+        `server`; check `class_name` when that matters.
 
-        Its `api` section is what the ModuleScript hands back: members of returned table with
-        resolved signatures, plus `export type` declarations. No body. Use it instead of reading
-        module you only intend to call. `api.return_kind` says what shape came back — `table`,
-        `function`, `table_literal`, `expression`, `conditional`, `unknown`, `none`.
-
-        `none` = Script or LocalScript, no public surface, and only ever reported when sourcemap
-        agrees file is not ModuleScript. `conditional` = module returns from more than one branch and
-        branches disagree on shape. Branches that agree keep specific kind — module returning
-        function from both arms of top-level `if` is `function`, not `conditional`. Either way
-        `api.note` names each branch and its line, so surface depending on condition is always
-        visible. `unknown` = sourcemap calls it ModuleScript but return could not be located
-        statically; read end of file. Returns inside top-level `if`/`else`, `do`, or loop count as
-        module's own — return inside function body does not. Luau `if ... then ... else` expression
-        is value, not block, and does not hide returns that follow it. `api.note` explains every case
-        where surface is empty or partial.
+        `api` is what the ModuleScript hands back: members of the returned table with resolved
+        signatures, plus `export type` declarations, no body. Use it instead of reading a module
+        you only intend to call. `api.return_kind` is `table`, `function`, `table_literal`,
+        `expression`, `conditional`, `unknown`, or `none`. `none` = Script or LocalScript, no
+        public surface. `conditional` = branches disagree on shape; branches that agree keep the
+        specific kind. `unknown` = ModuleScript whose return could not be located statically; read
+        the end of the file. Returns inside a top-level `if`/`else`, `do`, or loop count as the
+        module's own; a return inside a function body does not. `api.note` explains every empty or
+        partial surface, naming each branch and its line.
     </Topic>
 
     <Topic name="GetRequireGraph">
-        `get_require_graph` sees module-level coupling that `find_referencing_symbols` cannot: that
-        tool sees symbol references, not requires. Pass `relative_path` for one module, `direction`
-        (`dependencies`, `dependents`, `both`), `depth` for transitive hops. Omit `relative_path` for
-        project-wide answer naming every require cycle.
-
-        Graph scans the project walk plus every Luau file the sourcemap names, so gitignored vendored
-        trees such as `Packages/` are in it and requires into them resolve.
-
-        Requires resolved through sourcemap, so `script.Parent.Parent.Shared.X`,
-        `game:GetService("ReplicatedStorage").Y`, `:WaitForChild("Z")`, and `@Alias/Module` all
-        resolve. Requires that cannot be resolved statically — `require(modules[name])`, require
-        through wrapper function — land in `unresolved` with reason. Read that list. Empty
-        `dependencies` plus non-empty `unresolved` means module has real dependencies Biskit cannot
-        see, not that it has none. Project using runtime module loader instead of `require` has empty
-        graph and that is honest, not broken.
+        The graph covers the project walk plus every Luau file the sourcemap names, so gitignored
+        vendored trees such as `Packages/` are in it and requires into them resolve.
+        `script.Parent.Parent.Shared.X`, `game:GetService("ReplicatedStorage").Y`,
+        `:WaitForChild("Z")`, and `@Alias/Module` all resolve. Requires that cannot be resolved
+        statically — `require(modules[name])`, require through a wrapper function — land in
+        `unresolved` with a reason. Read that list: empty `dependencies` plus non-empty `unresolved`
+        means real dependencies Biskit cannot see, not none. A project using a runtime module
+        loader instead of `require` has an empty graph, and that is honest.
     </Topic>
 
     <Topic name="SharedRequire">
-        `shared("Foo")` is a require too. Sawhorse frameworks give the `shared` global a `__call`
-        metamethod, so it requires the module whose file is named `Foo.luau`. The language server
-        resolves it as `require`, and so does the graph: those calls are ordinary edges in
-        `dependencies` and `dependents`. Bare stem or partial path (`shared("Jobs/Runner")`),
-        case-insensitive, `dir/init.luau` addressed as `dir`. Where several files carry the name,
-        Biskit applies its own heuristic, not the loader's: candidate sharing most instance-tree
-        ancestors with caller wins, and shallowest candidate breaks remaining tie. Frameworks decide
-        collisions by index order instead, so check the answer when name is genuinely duplicated.
-        Candidates never include anything under `_Index` — package manager writes second copy of
-        every vendored module there and no loader addresses those by name. Tie that survives both
-        rules lands in `unresolved` naming every candidate, so pick one and write the partial path.
-        `shared(name)` and `shared("a" .. b)` land in `unresolved` — the language server does not
-        resolve those either, so the diagnostic on that line is real. `shared.someField` is table
-        access, not a require. If `get_status` reports `shared_require.graph_edges` false, the graph
-        is not counting these calls and its dependency lists understate what the module actually
-        needs.
+        `shared("Foo")` is a require too, resolved by the language server and the graph as an
+        ordinary edge to the module whose file is named `Foo.luau`. Bare stem or partial path
+        (`shared("Jobs/Runner")`), case-insensitive, `dir/init.luau` addressed as `dir`. Where
+        several files carry the name, Biskit picks the candidate sharing the most instance-tree
+        ancestors with the caller, shallowest breaking the tie; frameworks decide by index order
+        instead, so check the answer when a name is genuinely duplicated. Nothing under `_Index` is
+        a candidate. A tie that survives lands in `unresolved` naming every candidate; write the
+        partial path. `shared(name)` and `shared("a" .. b)` land in `unresolved`, and the
+        diagnostic on that line is real. `shared.someField` is table access, not a require. If
+        `get_status` reports `shared_require.graph_edges` false, dependency lists understate what
+        the module needs.
     </Topic>
 
     <Topic name="ResolveInstancePath">
-        `resolve_instance_path` goes both ways. Pass `instance_path` for file behind
-        `game.ReplicatedStorage.Shared.Combat`; pass `relative_path` for where
-        `src/Shared/Combat/init.luau` ends up in game. Never guess this translation. File that
-        resolves to nothing is not synced by rojo project, so editing it changes nothing at runtime.
+        A file that resolves to nothing is not synced by the rojo project, so editing it changes
+        nothing at runtime.
     </Topic>
 
     <Topic name="SourcemapStaleness">
-        Every DataModel answer carries `sourcemap` with mtime, age, and `stale`. `stale: true` means
-        a Luau file is newer than the sourcemap, so the answer describes a game the project no longer
-        builds and a script added or moved since then is invisible. Regenerate the sourcemap before
-        trusting it. Age alone does not answer this: sourcemap generated forty seconds ago is stale
-        if file was written thirty seconds ago, and fresh if nothing changed in hour. `get_status`
+        Every DataModel answer carries `sourcemap` with mtime, age, and `stale`. `stale: true`
+        means a Luau file is newer than the sourcemap, so a script added or moved since is
+        invisible; regenerate before trusting it. Age alone does not answer this. `get_status`
         names the offending file in `sourcemap.newest_source`.
     </Topic>
 
     <Topic name="QueryRobloxApi">
-        `query_roblox_api` is ground truth for Roblox API, read from same type definitions the
-        checker uses. Do not recall Roblox API from memory — hallucinated method looks exactly like
-        real one until it runs.
+        A member answer carries signature, parameter docs, return docs, deprecation plus
+        replacement. A class answer carries three counts: `returned_count` is how many members are
+        in the answer, `matched_count` how many survived `member_filter` before `max_members`
+        capped it, `total_member_count` how many the class carried before the filter; the last
+        two are omitted when equal to the one above. Members hidden at the current
+        `lsp.roblox_security_level` are absent, and the answer names the level it read.
 
-        Ask it for class (`BasePart`), member (`TweenService:Create`, `BasePart.Anchored`), or enum
-        (`Enum.EasingStyle`). Member answer carries signature, parameter docs, return docs,
-        deprecation plus replacement. Class answer lists own members only; pass `include_inherited:
-        true` to walk ancestry, `member_filter` to narrow. Three counts, each answering different
-        question: `returned_count` is how many members are in answer, `matched_count` how many
-        survived `member_filter` before `max_members` capped list, `total_member_count` how many
-        class carried before filter. Last two omitted when they equal the one above. Capped answer is
-        sorted first: own members before inherited, current before deprecated, so sample is worth
-        reading. Members hidden at current `lsp.roblox_security_level` are absent, and answer names
-        the level it read.
-
-        Enum answer lists item names and, where documentation carries one, `learn_more_link`. It does
-        not carry numeric `EnumItem.Value`: neither type definitions nor documentation dump Biskit
-        caches records those numbers. Serialised enum read back as number cannot be named from this
-        tool; follow `learn_more_link` or call `Enum.X:FromValue(n)` at runtime.
+        An enum answer lists item names and, where documentation carries one, `learn_more_link`.
+        It does not carry numeric `EnumItem.Value`; follow `learn_more_link` or call
+        `Enum.X:FromValue(n)` at runtime.
     </Topic>
 </Section>
 
 <Section name="WallyPackages" desc="The four tools that touch dependencies. Only reach for them when asked.">
     <Rule>
-        Do not survey Wally packages on your own initiative. These tools exist for when the human
-        asks about dependencies, names a package, or asks for one to be added or removed. Checking
-        whether some package might help is not part of ordinary work here, and every registry call
-        costs a network round trip.
+        Do not survey Wally packages on your own initiative. Use these tools when the human asks
+        about dependencies, names a package, or asks for one to be added or removed. Every registry
+        call costs a network round trip.
     </Rule>
 
     <Rule>
         Biskit never installs Wally. When no `wally` executable is on PATH, all four tools fail
-        saying so, and that is the whole answer: do not offer to install it, and do not work around
-        it by editing `wally.toml` with your own write tools. A version manager such as Aftman or
-        Rokit puts a shim on PATH that refuses until the tool is in its manifest, so "Wally is not
-        available" can mean present-but-not-runnable; the error says which.
+        saying so, and that is the whole answer: do not offer to install it, and do not edit
+        `wally.toml` with your own write tools instead. A version manager shim (Aftman, Rokit) can
+        be present but refuse to run; the error says which.
     </Rule>
 
     <Topic name="ListWallyPackages">
-        `list_wally_packages` reads `wally.toml` and `wally.lock` off disk and costs no registry
-        request. Each entry carries the requirement as written, the section it sits in, the version
-        the lockfile resolved, and `installed`. `installed: true` means the package's own folder is
-        under `_Index` and a require of it resolves; `installed: false` means it is missing or the
-        index directory was left half written, so every require of it fails whatever `wally.toml`
-        says. `lock_out_of_date: true` means the lockfile holds a version the requirement no longer
-        allows.
-
-        The `alias` is the key in `wally.toml`, and it is the name the package is required by:
-        `Packages.Roact`, not `Packages.roact`. Read it there rather than guessing from the package
-        name.
+        `installed: true` means the package's own folder is under `_Index` and a require of it
+        resolves; `installed: false` means it is missing or the index was left half written, so
+        every require of it fails whatever `wally.toml` says. `lock_out_of_date: true` means the
+        lockfile holds a version the requirement no longer allows. `alias` is the name the package
+        is required by (`Packages.Roact`, not `Packages.roact`); read it there rather than guessing.
     </Topic>
 
     <Topic name="SearchWallyPackages">
-        `search_wally_packages` matches on scope, name, and description, so `promise` and `evaera`
-        both find the same package. It reports `latest_version`, which is the version
-        `add_wally_package` would pin if you passed none. Use it to confirm a scope and name before
-        adding: a package name recalled from memory is a package that may not exist.
-
-        Answers are cached briefly and requests are paced, so a repeated query is free and a burst
-        of new ones is slow on purpose.
+        `latest_version` is what `add_wally_package` pins when passed no version. Answers are
+        cached briefly and requests are paced, so a repeated query is free and a burst of new ones
+        is slow on purpose.
     </Topic>
 
     <Topic name="AddAndRemove">
-        `add_wally_package` writes the requirement into `wally.toml` and runs `wally install`.
-        Omit `version` to pin the newest published release as a caret requirement; prereleases are
-        never chosen for you, so pass `version` to take one deliberately.
+        Both tools report `install_ran`, which says only whether `wally install` was run, not what
+        is on disk; `list_wally_packages` and its `installed` field answer that.
 
-        `wally install` deletes `Packages`, `ServerPackages`, and `DevPackages` and rebuilds all
-        three from the lockfile. Nothing about it is additive, and the whole tree is rewritten
-        however small the change. When adding several packages, pass `install: false` on all but the
-        last so one install covers them; between those calls the manifest and the tree disagree, and
-        the result says so.
+        A failed `wally install` leaves `Packages`, `ServerPackages`, and `DevPackages` empty,
+        packages unrelated to the call included. Biskit rolls the `wally.toml` edit back, but
+        restoring the tree takes a successful install. Report it to the human; do not continue.
 
-        Both tools report `install_ran`, which says only whether `wally install` was run. It is not
-        a claim about what is on disk; `list_wally_packages` and its `installed` field answer that.
-
-        A package is declared in one realm only. Adding one that is already declared elsewhere is
-        refused, and `overwrite` is what moves it, so `remove_wally_package`'s `realm` argument is
-        only for a hand written `wally.toml` that declares the same name twice. Leave it off
-        otherwise.
-
-        `realm` decides both the section and the directory: `shared` is `[dependencies]` and
-        `Packages`, `server` is `[server-dependencies]` and `ServerPackages`, `dev` is
-        `[dev-dependencies]` and `DevPackages`. A server package may depend on shared packages; a
-        shared package may not depend on server ones.
-
-        `server` and `dev` carry one more requirement: Wally will not link a server or dev package
-        that depends on a shared package until `wally.toml` says where shared packages live.
-
-        ```toml
-        [place]
-        shared-packages = "game.ReplicatedStorage.Packages"
-        ```
-
-        Almost every non-trivial package has shared dependencies, so without that table those two
-        realms fail to install. The add result carries a note when the table is absent, and the
-        install error names it as the fix.
-
-        A failed `wally install` is not a no-op. Wally empties `Packages`, `ServerPackages`, and
-        `DevPackages` before it rebuilds them, so when it gives up partway, packages that had
-        nothing to do with the call are gone from disk. Biskit rolls the `wally.toml` edit back and
-        names what is missing, but restoring the tree takes a successful `wally install`. Report
-        that to the human rather than moving on.
-
-        `remove_wally_package` takes the package name or its alias. Before removing, call
-        `get_require_graph` or `find_referencing_symbols` on what requires it — a removed package
-        leaves every require of it broken, and the diagnostic arrives only after the tree is
-        rebuilt.
+        Before removing, call `get_require_graph` or `find_referencing_symbols` on what requires
+        the package; the diagnostic arrives only after the tree is rebuilt.
     </Topic>
 
     <Topic name="AfterInstalling">
-        Installing rewrites the package tree, so the sourcemap generated before it is stale and
-        knows nothing about the new modules. Regenerate it, or the language server will not resolve
-        requires into the package you just added. `get_status` reports sourcemap staleness.
+        Installing rewrites the package tree, so the sourcemap from before it is stale and the
+        language server will not resolve requires into the new package. Regenerate it.
     </Topic>
 </Section>
 
@@ -486,8 +284,7 @@
     </Rule>
     <Rule>
         If edit changed symbol signature or behavior, call `get_symbol_diagnostics` with
-        `check_symbol_references: true` to catch breakage at call sites. Every referencing file is
-        swept whole, declaring file included, so same-file call sites are reported too.
+        `check_symbol_references: true` to catch breakage at call sites.
     </Rule>
 </Section>
 
@@ -511,54 +308,29 @@
 
     <Rule>
         Use `edit_memory` to amend existing memory, not wholesale rewrite with `create_memory`.
-        Wholesale rewrites lose detail that was there for reason. `create_memory` errors when name
-        already taken; pass `overwrite: true` only when replacing content deliberately.
-    </Rule>
-
-    <Rule>
-        `edit_memory` replacement expands `$1` and `${name}` as capture groups, so dollar sign meant
-        literally must be written `$$`: `costs $$5`, not `costs $5`. Replacement naming group pattern
-        does not define is refused, not silently emptied.
+        Wholesale rewrites lose detail that was there for reason.
     </Rule>
 </Section>
 
-<Section name="DiagnosticsSeverity" desc="Filtering and reading diagnostic answers.">
-    <Rule>
-        `min_severity` filters results: `1` errors only, `2` errors and warnings, `3` adds
-        information, `4` adds hints. Default `2`. Ask `1` when you care only whether something
-        broken.
-    </Rule>
-
+<Section name="DiagnosticsSeverity" desc="Reading diagnostic answers.">
     <Rule>
         Diagnostics grouped file, then severity, then `symbols` keyed by name path. Diagnostics
         belonging to no symbol land in `unscoped` list beside it.
-    </Rule>
-
-    <Rule>
-        `start_line`/`end_line` are 1-based and inclusive. `0`, or `start_line` past `end_line`, is
-        refused rather than answered empty.
     </Rule>
 </Section>
 
 <Section name="WhenTheLanguageServerMisbehaves" desc="Diagnosing an empty answer before you retry.">
     <Rule>
-        Empty result has three causes and empty result shows none of them: project genuinely lacks
-        symbol, sourcemap missing or stale, language server dead. Call `get_status` to tell them
-        apart before you retry.
+        Empty result has three causes and shows none of them: project genuinely lacks symbol,
+        sourcemap missing or stale, language server dead. Call `get_status` to tell them apart
+        before you retry.
     </Rule>
 
     <Rule>
-        `get_status` reports project root and how it was chosen, language server state, sourcemap
-        freshness against newest Luau file, memory count, every setting that differs from default.
-        `stale: true` on sourcemap means script added or moved since it was generated, so instance
-        paths and DataModel types are wrong until it is regenerated.
-    </Rule>
-
-    <Rule>
-        If symbol tools return empty results for file you know has symbols, or diagnostics look stale
-        against file you just changed, call `restart_language_server`. Cheap. Do not restart
-        reflexively for empty result that means only "no matches" — verify with
-        `get_symbols_overview` or `get_status` first.
+        If symbol tools return empty for file you know has symbols, or diagnostics look stale
+        against file you just changed, call `restart_language_server`. Do not restart reflexively
+        for empty result that means only "no matches" — verify with `get_symbols_overview` or
+        `get_status` first.
     </Rule>
 </Section>
 </Main>

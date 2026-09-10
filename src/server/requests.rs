@@ -22,11 +22,12 @@ pub struct CreateMemoryRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EditMemoryRequest {
+    /// Memory name, without the .md extension.
     pub memory_name: String,
     /// Regular expression matched against the memory body.
     pub pattern: String,
     /// Replacement text. Capture groups are available as `$1`, `$2`, and `${name}`; write `$$` for
-    /// a literal dollar sign.
+    /// a literal dollar sign. Naming a group the pattern does not define is refused, not emptied.
     pub replacement: String,
     /// Replace every match instead of erroring when the pattern is ambiguous.
     #[serde(default)]
@@ -113,48 +114,64 @@ pub struct SymbolsOverviewRequest {
     /// Luau source file relative to the project root.
     pub relative_path: String,
     /// How many levels of nested symbols to include. 0 lists top-level symbols only. Defaults to
-    /// 1, which is where the members of a table live.
+    /// 1, which is where the members of a table live; raise it for tables inside tables. A
+    /// member nests under its owner only when the owner is declared in the same file.
     #[serde(default = "default_overview_depth")]
     pub depth: u32,
-    /// Include each symbol's resolved type signature. Off by default because signatures are long
-    /// and each one costs the language server a request.
+    /// Include each symbol's resolved type signature, the same one explain_symbol reports. Off by
+    /// default because signatures are long and each one costs the language server a request; a
+    /// wide answer that runs out of budget says so in "note" and later symbols carry no detail.
     #[serde(default)]
     pub include_detail: bool,
-    /// Include variables declared inside a function body. Off by default, where each symbol
-    /// instead reports how many children were left out as "omitted_children".
+    /// Include variables declared inside a function body, which is what makes depth map the body
+    /// rather than only the members. Off by default, where each symbol instead reports how many
+    /// were left out as "omitted_children".
     #[serde(default)]
     pub include_locals: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FindSymbolRequestInput {
-    /// Name path such as "update", "PlayerService/update", "PlayerService:update", or
-    /// "/PlayerService". Append "[n]" to a segment to pick one of several same-named symbols.
+    /// Chain of enclosing symbol names; "/", "." and ":" all separate, so write it as it appears
+    /// in source. "update" matches any symbol named update at any depth; "PlayerService/update",
+    /// "PlayerService.update" and "PlayerService:update" all match update nested directly inside
+    /// PlayerService; a leading "/" anchors to top level, so "/PlayerService" skips nested ones.
+    /// The owner is optional: a method declared `function PlayerUtils:GetPlayerMaid()` answers to
+    /// "GetPlayerMaid" alone. Append "[n]" to a segment, as get_symbols_overview labels
+    /// duplicates ("UserInfo[1]"), to pick one of several same-named symbols.
     pub name_path: String,
     /// File or directory to search. Omit to search the whole project.
     #[serde(default)]
     pub relative_path: Option<String>,
-    /// Levels of children to include alongside each match.
+    /// Levels of children to include alongside each match. 0, the default, is the match alone;
+    /// 1 adds a table's members. A member nests under its owner only when the owner is declared
+    /// in the same file; a member of a table declared elsewhere stays top-level.
     #[serde(default)]
     pub depth: u32,
     /// Include each matched symbol's source text.
     #[serde(default)]
     pub include_body: bool,
-    /// Include each symbol's resolved type signature. Off by default because signatures are long
-    /// and each one costs the language server a request.
+    /// Include each symbol's resolved type signature, the same one explain_symbol reports. Off by
+    /// default because signatures are long and each one costs the language server a request; a
+    /// wide answer that runs out of budget says so in "note" and later symbols carry no detail.
     #[serde(default)]
     pub include_detail: bool,
-    /// Include variables declared inside a function body. Off by default, where each symbol
-    /// instead reports how many children were left out as "omitted_children".
+    /// Include variables declared inside a function body, which is what makes depth map the body
+    /// rather than only the members. Off by default, where each symbol instead reports how many
+    /// were left out as "omitted_children". A local is still found by name without this flag.
     #[serde(default)]
     pub include_locals: bool,
-    /// LSP SymbolKind numbers to keep. Empty means all kinds.
+    /// LSP SymbolKind numbers to keep. Empty means all kinds. 1 File, 2 Module, 3 Namespace, 4
+    /// Package, 5 Class, 6 Method, 7 Property, 8 Field, 9 Constructor, 10 Enum, 11 Interface, 12
+    /// Function, 13 Variable, 14 Constant, 15 String, 16 Number, 17 Boolean, 18 Array, 19 Object,
+    /// 20 Key, 21 Null, 22 EnumMember, 23 Struct, 24 Event, 25 Operator, 26 TypeParameter. A
+    /// number outside 1 to 26 is refused rather than matching nothing.
     #[serde(default)]
     pub include_kinds: Vec<u32>,
-    /// LSP SymbolKind numbers to drop.
+    /// LSP SymbolKind numbers to drop; same numbering as include_kinds.
     #[serde(default)]
     pub exclude_kinds: Vec<u32>,
-    /// Match the final name path segment as a substring.
+    /// Match the final name path segment as a substring, for when only part of the name is known.
     #[serde(default)]
     pub substring_matching: bool,
     /// Cap on returned matches.
@@ -164,34 +181,42 @@ pub struct FindSymbolRequestInput {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SymbolLocationRequest {
-    /// Name path of the symbol. Append "[n]" to a segment to pick one of several same-named symbols.
+    /// Name path of the symbol, in find_symbol's syntax. Must resolve to exactly one symbol:
+    /// append "[n]" to a segment to pick one of several same-named symbols.
     pub name_path: String,
     /// File containing the symbol, relative to the project root.
     pub relative_path: String,
     /// Source lines to show either side of each reference. 0 shows the reference line alone.
+    /// Each extra line is paid for every reference, so raise it only when the line itself is not
+    /// enough to judge how the symbol is used.
     #[serde(default)]
     pub context_lines: usize,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FindDeclarationRequest {
-    /// Name path of a symbol the file itself declares. Append "[n]" to a segment to pick one of
-    /// several same-named symbols. Omit to point with line and column instead, which is how a
-    /// symbol declared in another file is asked about.
+    /// Name path, in find_symbol's syntax, of a symbol the file itself declares; must resolve to
+    /// exactly one, so append "[n]" to a segment to pick among same-named symbols. Omit to point
+    /// with line and column instead, which is how a symbol declared in another file is asked
+    /// about. Pass one or the other, never both.
     #[serde(default)]
     pub name_path: Option<String>,
     /// File containing the symbol, relative to the project root.
     pub relative_path: String,
-    /// 1-based line of a use of the symbol. Omit when name_path is given.
+    /// 1-based line of a use of the symbol, the same numbering every Biskit result reports. Omit
+    /// when name_path is given. A line past the end of the file is refused, naming the real
+    /// length, never clamped.
     #[serde(default)]
     pub line: Option<u32>,
-    /// 1-based column on that line. Defaults to the start of the line.
+    /// 1-based column on that line. Defaults to the start of the line. A column past the end of
+    /// the line is refused, naming the real length.
     #[serde(default)]
     pub column: Option<u32>,
     /// Include a source snippet around each result.
     #[serde(default)]
     pub include_body: bool,
-    /// Include each symbol's type signature. Off by default because signatures are long.
+    /// Include each symbol's type signature, the same one explain_symbol reports. Off by default
+    /// because signatures are long.
     #[serde(default)]
     pub include_detail: bool,
 }
@@ -199,13 +224,15 @@ pub struct FindDeclarationRequest {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FileDiagnosticsRequest {
     pub relative_path: String,
-    /// First line to report on, 1-based.
+    /// First line to report on, 1-based and inclusive. 0, or a start past end_line, is refused
+    /// rather than answered empty.
     #[serde(default)]
     pub start_line: Option<u32>,
-    /// Last line to report on, 1-based.
+    /// Last line to report on, 1-based and inclusive.
     #[serde(default)]
     pub end_line: Option<u32>,
-    /// 1 error, 2 warning, 3 information, 4 hint. Defaults to 2.
+    /// Least severe level to report: 1 errors only, 2 adds warnings, 3 adds information, 4 adds
+    /// hints. Defaults to 2. Ask 1 when the only question is whether something is broken.
     #[serde(default)]
     pub min_severity: Option<u32>,
     /// Re-read the file even when its size and modification time say it has not moved. Only worth
@@ -216,13 +243,17 @@ pub struct FileDiagnosticsRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SymbolDiagnosticsRequest {
+    /// Name path of the symbol, in find_symbol's syntax. Must resolve to exactly one symbol:
+    /// append "[n]" to a segment to pick one of several same-named symbols.
     pub name_path: String,
+    /// File declaring the symbol, relative to the project root.
     pub relative_path: String,
     /// Also report diagnostics in every file that references this symbol, the declaring file
     /// included, each swept whole rather than clipped to the symbol.
     #[serde(default)]
     pub check_symbol_references: bool,
-    /// 1 error, 2 warning, 3 information, 4 hint. Defaults to 2.
+    /// Least severe level to report: 1 errors only, 2 adds warnings, 3 adds information, 4 adds
+    /// hints. Defaults to 2. Ask 1 when the only question is whether something is broken.
     #[serde(default)]
     pub min_severity: Option<u32>,
     /// Re-read the files even when their size and modification time say they have not moved. Only
@@ -233,18 +264,24 @@ pub struct SymbolDiagnosticsRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExplainSymbolRequest {
-    /// Name path of the symbol. Omit to point with line and column instead.
+    /// Name path of the symbol, in find_symbol's syntax. Omit to point with line and column
+    /// instead, which is what a call site, table field, or diagnostic location needs. Pass one or
+    /// the other, never both.
     #[serde(default)]
     pub name_path: Option<String>,
     /// File containing the position, relative to the project root.
     pub relative_path: String,
-    /// 1-based line, used instead of name_path. Aim it at a use of the symbol.
+    /// 1-based line, the same numbering every Biskit result reports, used instead of name_path.
+    /// Aim it at a use of the symbol. A line past the end of the file is refused, naming the real
+    /// length, never clamped.
     #[serde(default)]
     pub line: Option<u32>,
-    /// 1-based column on that line. Defaults to 1.
+    /// 1-based column on that line. Defaults to 1. A column past the end of the line is refused,
+    /// naming the real length.
     #[serde(default)]
     pub column: Option<u32>,
-    /// Include the doc comment alongside the type. Off by default because docs are long.
+    /// Include the doc comment alongside the type. Off by default because docs are long; opt in
+    /// for behaviour, not for shape.
     #[serde(default)]
     pub include_documentation: bool,
 }
@@ -254,9 +291,11 @@ pub struct SignatureHelpRequest {
     /// File containing the call, relative to the project root.
     pub relative_path: String,
     /// 1-based line of the call. A declaration is never inside a call's parentheses, so this
-    /// tool takes a position only, never a name path.
+    /// tool takes a position only, never a name path. A line past the end of the file is refused,
+    /// naming the real length.
     pub line: u32,
-    /// 1-based column on that line, inside the call's parentheses. Defaults to 1.
+    /// 1-based column on that line, inside the call's parentheses. Defaults to 1. A column past
+    /// the end of the line is refused, naming the real length.
     #[serde(default)]
     pub column: Option<u32>,
     /// Include the doc comment alongside the type. Off by default because docs are long.
@@ -266,23 +305,27 @@ pub struct SignatureHelpRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TypeDefinitionRequest {
-    /// Name path of a type. Omit to point with line and column instead, which is what a type
-    /// written as an annotation needs.
+    /// Name path, in find_symbol's syntax, of a type declaration itself. Omit to point with line
+    /// and column instead, which is what a type written as an annotation needs. Pass one or the
+    /// other, never both.
     #[serde(default)]
     pub name_path: Option<String>,
     /// File containing the position, relative to the project root.
     pub relative_path: String,
     /// 1-based line. Aim it at the type's own name: in `local config: PlayerConfig`, at
-    /// `PlayerConfig` rather than at `config`.
+    /// `PlayerConfig` rather than at `config`, which returns nothing. A line past the end of the
+    /// file is refused, naming the real length.
     #[serde(default)]
     pub line: Option<u32>,
-    /// 1-based column on that line. Defaults to 1.
+    /// 1-based column on that line. Defaults to 1. A column past the end of the line is refused,
+    /// naming the real length.
     #[serde(default)]
     pub column: Option<u32>,
     /// Include a source snippet around each result.
     #[serde(default)]
     pub include_body: bool,
-    /// Include each symbol's type signature. Off by default because signatures are long.
+    /// Include each symbol's type signature, the same one explain_symbol reports. Off by default
+    /// because signatures are long.
     #[serde(default)]
     pub include_detail: bool,
 }
@@ -291,10 +334,11 @@ pub struct TypeDefinitionRequest {
 pub struct InlayHintsRequest {
     /// Luau source file relative to the project root.
     pub relative_path: String,
-    /// First line to report on, 1-based. Defaults to the start of the file.
+    /// First line to report on, 1-based and inclusive. Defaults to the start of the file. 0, or a
+    /// start past end_line, is refused rather than answered empty.
     #[serde(default)]
     pub start_line: Option<u32>,
-    /// Last line to report on, 1-based. Defaults to the end of the file.
+    /// Last line to report on, 1-based and inclusive. Defaults to the end of the file.
     #[serde(default)]
     pub end_line: Option<u32>,
 }
@@ -346,14 +390,15 @@ pub struct RobloxApiRequest {
     #[serde(default)]
     pub member_filter: Option<String>,
     /// Include members a class inherits from its ancestors. Off by default because Instance alone
-    /// carries dozens.
+    /// carries dozens; a class answer lists own members only without it.
     #[serde(default)]
     pub include_inherited: bool,
     /// Include the documentation prose. Off by default for a class listing; a single member
     /// carries it regardless.
     #[serde(default)]
     pub include_documentation: bool,
-    /// Cap on members returned for a class or items for an enum.
+    /// Cap on members returned for a class or items for an enum. A capped answer is sorted first,
+    /// own members before inherited and current before deprecated, so the sample is worth reading.
     #[serde(default = "default_max_members")]
     pub max_members: usize,
 }
@@ -378,10 +423,12 @@ pub struct AddWallyPackageRequest {
     /// which costs one registry lookup. Prereleases are never chosen for you.
     #[serde(default)]
     pub version: Option<String>,
-    /// "shared" for [dependencies], "server" for [server-dependencies], "dev" for
-    /// [dev-dependencies]. Defaults to "shared". "server" and "dev" need wally.toml to carry a
-    /// [place] shared-packages entry before Wally will install a package that depends on a shared
-    /// one, which most do.
+    /// "shared" for [dependencies] and Packages/, "server" for [server-dependencies] and
+    /// ServerPackages/, "dev" for [dev-dependencies] and DevPackages/. Defaults to "shared". A
+    /// server package may depend on shared ones, never the reverse. "server" and "dev" need
+    /// wally.toml to carry `[place] shared-packages = "game.ReplicatedStorage.Packages"` before
+    /// Wally will install a package that depends on a shared one, which most do; the result
+    /// notes when that table is absent.
     #[serde(default)]
     pub realm: Option<String>,
     /// The name the package is required by, which is its name under Packages/. Defaults to the
