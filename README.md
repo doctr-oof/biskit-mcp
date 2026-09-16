@@ -277,7 +277,7 @@ Every option is documented inline in the generated `.biskit/settings.yml`. The o
 
 | Key | Default | Purpose |
 |---|---|---|
-| `lsp.version` | `v0.2.0` | luau-lsp release tag |
+| `lsp.version` | `v0.2.1` | luau-lsp release tag |
 | `lsp.repository` | `Sawhorse-Interactive/luau-lsp-carpenter` | Where the release comes from |
 | `lsp.binary_path` | unset | Use an existing binary and skip downloading |
 | `lsp.checksums` | built-in pins | SHA-256 digests by asset filename |

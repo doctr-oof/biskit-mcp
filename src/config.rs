@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-pub const DEFAULT_LSP_VERSION: &str = "v0.2.0";
+pub const DEFAULT_LSP_VERSION: &str = "v0.2.1";
 pub const DEFAULT_LSP_REPOSITORY: &str = "Sawhorse-Interactive/luau-lsp-carpenter";
 
 pub const DEFAULT_TYPE_DEFINITIONS_URL: &str =
@@ -22,19 +22,19 @@ pub const FIRST_SHARED_REQUIRE_VERSION: (u32, u32, u32) = (0, 2, 0);
 const PINNED_CHECKSUMS: [(&str, &str); 4] = [
     (
         "luau-lsp-win64.zip",
-        "28c0a72f282c26d34b376664786857ce60aa4eecbec40e9daf7ea3ef3a193936",
+        "5673da4febb5d4d017ad36d2c816c98361335995830cd950580a7cf07bb58392",
     ),
     (
         "luau-lsp-macos.zip",
-        "64c461c215a8965da16e3300e1470c1d5b4e0c2d03eb9d3a539efab4969b8d91",
+        "28ff80f6a2427ce07f75b5c253a509839c5921f431d9504a047e047eebfed18d",
     ),
     (
         "luau-lsp-linux-x86_64.zip",
-        "a468876d6559a77e718dd9eec37a555ce212d7ea04fc3124e92ca0f33f10912c",
+        "91ebec4f6f278b9a3b0e15b986f7db89608530a810fdea982ab9f2aaba7ae2b5",
     ),
     (
         "luau-lsp-linux-arm64.zip",
-        "b919879d703f5ae9cf92e908ae3556188930eac9b07728de8561d74173c1d95c",
+        "780463adf83b0d0accacd9ada71ae08c2bc67e641fc28bb3ee9d379dcf0e4a75",
     ),
 ];
 
@@ -572,7 +572,7 @@ mod tests {
         let settings = LspSettings::default();
         assert_eq!(
             settings.checksum_for("luau-lsp-win64.zip").as_deref(),
-            Some("28c0a72f282c26d34b376664786857ce60aa4eecbec40e9daf7ea3ef3a193936")
+            Some("5673da4febb5d4d017ad36d2c816c98361335995830cd950580a7cf07bb58392")
         );
 
         let mut custom = LspSettings {
