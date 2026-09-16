@@ -8,7 +8,7 @@
 
 lsp:
   # Release tag of luau-lsp to use. The carpenter fork tags with a leading "v".
-  # version: "v0.2.0"
+  # version: "v0.2.1"
 
   # GitHub repository the release asset is downloaded from.
   # repository: "Sawhorse-Interactive/luau-lsp-carpenter"
