@@ -26,15 +26,15 @@ use crate::roblox::requires::{Direction, GraphRequest};
 pub use crate::server::requests::{
     AddWallyPackageRequest, CreateMemoryRequest, EditMemoryRequest, ExplainSymbolRequest,
     FileDiagnosticsRequest, FindDeclarationRequest, FindFileRequest, FindSymbolRequestInput,
-    InitialInstructionsRequest, InlayHintsRequest, ListDirRequest, MemoryNameRequest,
-    ModuleContextRequest, NoArguments, RemoveWallyPackageRequest, RenameMemoryRequest,
-    RequireGraphRequest, ResolveInstancePathRequest, RobloxApiRequest, SearchForPatternRequest,
-    SearchOutputMode, SearchWallyPackagesRequest, SignatureHelpRequest, SymbolDiagnosticsRequest,
+    InlayHintsRequest, ListDirRequest, MemoryNameRequest, ModuleContextRequest, NoArguments,
+    RemoveWallyPackageRequest, RenameMemoryRequest, RequireGraphRequest,
+    ResolveInstancePathRequest, RobloxApiRequest, SearchForPatternRequest, SearchOutputMode,
+    SearchWallyPackagesRequest, SignatureHelpRequest, SymbolDiagnosticsRequest,
     SymbolLocationRequest, SymbolsOverviewRequest, TypeDefinitionRequest,
 };
 use crate::server::results::{OVERRUN_HINT, ToolResult, fail, truncate_at_char_boundary};
 use crate::wally::{AddRequest, RemoveRequest, WallyTools};
-use crate::{prompts, session_start, status};
+use crate::{prompts, status};
 
 #[derive(Clone)]
 pub struct Biskit {
@@ -43,10 +43,6 @@ pub struct Biskit {
 }
 
 struct Inner {
-    project: Project,
-    /// Unix milliseconds at which this server was constructed. A SessionStart delivery is this
-    /// session's only if it was recorded around the same moment.
-    started_at_ms: u64,
     settings: Settings,
     memories: MemoryStore,
     files: FileTools,
@@ -165,8 +161,6 @@ impl Biskit {
 
         Self {
             inner: Arc::new(Inner {
-                project,
-                started_at_ms: session_start::now_ms(),
                 settings,
                 memories,
                 files,
@@ -189,21 +183,12 @@ impl Biskit {
         self.inner.language_server.stop().await;
     }
 
-    /// Whether the SessionStart hook has already put the manual into the agent's context for the
-    /// session this server is serving.
-    fn manual_already_delivered(&self) -> bool {
-        session_start::delivered_for_session(&self.inner.project, self.inner.started_at_ms)
-    }
-
     #[tool]
     #[doc = descriptions::description!(initial_instructions)]
     async fn initial_instructions(
         &self,
-        Parameters(request): Parameters<InitialInstructionsRequest>,
+        Parameters(NoArguments {}): Parameters<NoArguments>,
     ) -> ToolResult {
-        if !request.force && self.manual_already_delivered() {
-            return self.text(prompts::ALREADY_DELIVERED);
-        }
         let memories = self
             .inner
             .memories
@@ -822,7 +807,6 @@ impl ServerHandler for Biskit {
             .with_server_info(Implementation::from_build_env())
             .with_instructions(prompts::connection_instructions(
                 self.inner.settings.project.memory_only,
-                self.manual_already_delivered(),
             ))
     }
 }
@@ -857,93 +841,43 @@ mod tests {
         }
     }
 
-    fn ask_for_instructions(biskit: &Biskit, force: bool) -> String {
+    fn ask_for_instructions(biskit: &Biskit) -> String {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         rendered(
             &runtime
-                .block_on(
-                    biskit.initial_instructions(Parameters(InitialInstructionsRequest { force })),
-                )
+                .block_on(biskit.initial_instructions(Parameters(NoArguments {})))
                 .unwrap(),
         )
     }
 
     #[test]
-    fn without_a_hook_delivery_the_manual_is_sent_in_full() {
+    fn the_manual_is_sent_in_full() {
         for memory_only in [false, true] {
             let (_dir, biskit) = open(memory_only);
-            let answer = ask_for_instructions(&biskit, false);
+            let answer = ask_for_instructions(&biskit);
             assert!(
                 answer.contains("<Section name=\"AvailableMemories\""),
+                "memory_only={memory_only}"
+            );
+            assert!(
+                answer.contains("<Section name=\"ChoosingATool\""),
                 "memory_only={memory_only}"
             );
         }
     }
 
     #[test]
-    fn a_hook_delivery_reduces_the_tool_to_a_stub() {
-        let (dir, biskit) = open(true);
-        let project = Project::open(dir.path()).unwrap();
-        session_start::record_delivery(&project).unwrap();
-
-        let answer = ask_for_instructions(&biskit, false);
-        assert_eq!(answer, prompts::ALREADY_DELIVERED);
-        assert!(!answer.contains("<Section name=\"AvailableMemories\""));
-    }
-
-    #[test]
-    fn force_recovers_the_full_manual_after_a_delivery() {
-        let (dir, biskit) = open(true);
-        let project = Project::open(dir.path()).unwrap();
-        session_start::record_delivery(&project).unwrap();
-
-        let answer = ask_for_instructions(&biskit, true);
-        assert!(answer.contains("<Section name=\"AvailableMemories\""));
-    }
-
-    #[test]
-    fn a_delivery_from_an_earlier_session_does_not_stub_this_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = Project::open(dir.path()).unwrap();
-        session_start::record_delivery(&project).unwrap();
-
-        let settings = Settings {
-            project: crate::config::ProjectSettings {
-                memory_only: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut biskit = Biskit::new(project, settings, "test");
-        let inner = Arc::get_mut(&mut biskit.inner).unwrap();
-        inner.started_at_ms = session_start::now_ms() + 24 * 60 * 60 * 1000;
-
-        assert!(
-            ask_for_instructions(&biskit, false).contains("<Section name=\"AvailableMemories\"")
-        );
-    }
-
-    #[test]
-    fn the_connection_instructions_follow_the_delivery() {
-        let (dir, biskit) = open(true);
+    fn the_connection_instructions_demand_the_tool_call() {
+        let (_dir, biskit) = open(true);
         assert!(
             biskit
                 .get_info()
                 .instructions
                 .unwrap()
                 .contains("You MUST call the `initial_instructions` tool")
-        );
-
-        session_start::record_delivery(&Project::open(dir.path()).unwrap()).unwrap();
-        assert!(
-            biskit
-                .get_info()
-                .instructions
-                .unwrap()
-                .contains("do NOT call `initial_instructions`")
         );
     }
 

@@ -36,7 +36,8 @@
         you believe you already understand. In this mode stored memory is the only durable project
         knowledge Biskit has, and regex search will not recover what it holds.
 
-        1. Read the memory index in `AvailableMemories` below. It is names only.
+        1. Read the memory index in `AvailableMemories` below. It is names only. When it is too
+           large to show, that section says so; call `list_memories` for it instead.
         2. Call `read_memory` on every name that plausibly relates to the task. When unsure whether a
            memory is relevant, read it.
         3. Only then begin the work.

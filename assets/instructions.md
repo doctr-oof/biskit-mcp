@@ -15,7 +15,8 @@
         file, run a search, or plan an approach. Every session, including short tasks and projects
         you believe you already understand.
 
-        1. Read the memory index in `AvailableMemories` below. It is names only.
+        1. Read the memory index in `AvailableMemories` below. It is names only. When it is too
+           large to show, that section says so; call `list_memories` for it instead.
         2. Call `read_memory` on every name that plausibly relates to the task. When unsure whether a
            memory is relevant, read it.
         3. Only then begin the work.
@@ -50,7 +51,7 @@
     <Tool name="list_dir" use="See what is in a directory" />
     <Tool name="search_for_pattern" use="Regex search across file contents" />
     <Tool name="read_memory" use="Read a memory named in the index below" />
-    <Tool name="list_memories" use="Re-list memories after writing one; the index below is the session's starting list" />
+    <Tool name="list_memories" use="Get the memory index when it is too large to show below, or re-list after writing one" />
     <Tool name="get_status" use="Work out why a tool returned nothing" />
 
     <Rule>

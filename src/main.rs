@@ -11,7 +11,7 @@ use biskit_mcp::memory::MemoryStore;
 use biskit_mcp::project::Project;
 use biskit_mcp::server::Biskit;
 use biskit_mcp::setup::{Client, HooksTarget};
-use biskit_mcp::{lsp, project, prompts, session_start, setup, upgrade};
+use biskit_mcp::{lsp, project, prompts, setup, upgrade};
 
 const PROJECT_ENV: &str = "BISKIT_PROJECT";
 
@@ -468,16 +468,9 @@ fn run_session_start_hook(request: RootRequest) -> Result<()> {
     let payload = serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": prompts::initial_instructions(&memories, memory_only),
+            "additionalContext": prompts::session_brief(&memories, memory_only),
         }
     });
     println!("{payload}");
-
-    if let Err(error) = session_start::record_delivery(&opened.project) {
-        eprintln!(
-            "biskit: could not record the session-start delivery ({error}); \
-             initial_instructions will answer with the full manual"
-        );
-    }
     Ok(())
 }
