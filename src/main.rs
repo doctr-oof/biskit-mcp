@@ -461,14 +461,12 @@ fn run_cache_clear(request: RootRequest) -> Result<()> {
 }
 
 fn run_session_start_hook(request: RootRequest) -> Result<()> {
-    let opened = open_project(request)?;
-    let memory_only = opened.settings.project.memory_only;
-    let memories = MemoryStore::new(opened.project.clone()).list()?;
+    open_project(request)?;
 
     let payload = serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": prompts::session_brief(&memories, memory_only),
+            "additionalContext": prompts::session_brief(),
         }
     });
     println!("{payload}");

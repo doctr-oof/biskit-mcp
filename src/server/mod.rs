@@ -189,13 +189,7 @@ impl Biskit {
         &self,
         Parameters(NoArguments {}): Parameters<NoArguments>,
     ) -> ToolResult {
-        let memories = self
-            .inner
-            .memories
-            .list()
-            .map_err(fail("initial_instructions"))?;
-        self.text(prompts::initial_instructions(
-            &memories,
+        self.text(prompts::instructions_manual(
             self.inner.settings.project.memory_only,
         ))
     }
@@ -859,7 +853,7 @@ mod tests {
             let (_dir, biskit) = open(memory_only);
             let answer = ask_for_instructions(&biskit);
             assert!(
-                answer.contains("<Section name=\"AvailableMemories\""),
+                !answer.contains("<Section name=\"AvailableMemories\""),
                 "memory_only={memory_only}"
             );
             assert!(

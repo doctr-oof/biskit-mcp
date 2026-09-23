@@ -1,7 +1,6 @@
 macro_rules! description {
     (initial_instructions) => {
-        "Returns Biskit's usage manual and the index of this project's memories. Call before any \
-         other Biskit tool."
+        "Returns Biskit's usage manual. Call before any other Biskit tool."
     };
     (list_memories) => {
         "Lists the names of this project's memories."
