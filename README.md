@@ -125,7 +125,9 @@ sits. When no ancestor has one, the nearest `.git/` or `default.project.json` wi
 ## Session start hook
 
 Biskit sets the MCP `instructions` field, which every compliant client surfaces. For Claude Code you
-can additionally inject the manual and memory index at session start.
+can additionally inject a short session brief at session start: the memory rules plus the memory
+index, or an instruction to call `list_memories` when the index is too large to fit. The full tool
+manual still comes from `initial_instructions`.
 
 `biskit-mcp setup --hooks` writes this to `.claude/settings.local.json`, which is personal and
 normally gitignored. Pass `--hooks-target shared` to put it in `.claude/settings.json` instead,
