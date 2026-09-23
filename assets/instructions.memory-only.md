@@ -31,15 +31,13 @@
 
 <Section name="SessionStart" desc="Mandatory, no exceptions. Runs before any other work.">
     <Behavior name="CheckMemoryFirst">
-        Check project memory before you do anything else: before you answer a question, open a
-        file, run a search, or plan an approach. Every session, including short tasks and projects
-        you believe you already understand. In this mode stored memory is the only durable project
-        knowledge Biskit has, and regex search will not recover what it holds.
-
-        1. Read the memory index in `AvailableMemories` below. It is names only.
+        You MUST check project memories before doing ANYTHING in EVERY session (non-negotiable).
+        In this mode stored memory is the only durable project knowledge Biskit has, and regex
+        search will not recover what it holds:
+        1. Read the memory index via the `list_memories` tool. It returns names only.
         2. Call `read_memory` on every name that plausibly relates to the task. When unsure whether a
            memory is relevant, read it.
-        3. Only then begin the work.
+        3. Only after reading relevant memories can you begin the work.
     </Behavior>
 
     <Rule>"None look relevant" is a conclusion you may reach only after reading the list, never before it.</Rule>

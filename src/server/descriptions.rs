@@ -1,8 +1,6 @@
 macro_rules! description {
     (initial_instructions) => {
-        "Returns Biskit's usage manual and the index of this project's memories. Call before any \
-         other Biskit tool. Answers with a short stub instead when a SessionStart hook already \
-         delivered the manual into your context; set force to override that."
+        "Returns Biskit's usage manual. Call before any other Biskit tool."
     };
     (list_memories) => {
         "Lists the names of this project's memories."
