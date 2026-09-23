@@ -3,22 +3,17 @@
 <Main name="BiskitInstructionsManual">
 <Section name="WhatBiskitIs" desc="Identity and hard boundary. Read first.">
     Biskit = symbolic code-intelligence and project-memory server for this Luau project. Symbol
-    lookup, references, and diagnostics come from the real language server, not text search.
+    lookup, references, and diagnostics come from a language server, not text search.
     Memories are durable curated notes that survive between sessions.
-
-    <Rule>Use own native write tools for all edits.</Rule>
 </Section>
 
 <Section name="SessionStart" desc="Mandatory, no exceptions. Runs before any other work.">
     <Behavior name="CheckMemoryFirst">
-        Check project memory before you do anything else: before you answer a question, open a
-        file, run a search, or plan an approach. Every session, including short tasks and projects
-        you believe you already understand.
-
-        1. Read the memory index in `AvailableMemories` below. It is names only.
+        You MUST check project memories before doing ANYTHING in EVERY session (non-negotiable):
+        1. Read the memory index via the `list_memories` tool. It returns names only.
         2. Call `read_memory` on every name that plausibly relates to the task. When unsure whether a
            memory is relevant, read it.
-        3. Only then begin the work.
+        3. Only after reading relevant memories can you begin the work.
     </Behavior>
 
     <Rule>"None look relevant" is a conclusion you may reach only after reading the list, never before it.</Rule>
@@ -49,8 +44,8 @@
     <Tool name="find_file" use="Find files by name or glob" />
     <Tool name="list_dir" use="See what is in a directory" />
     <Tool name="search_for_pattern" use="Regex search across file contents" />
-    <Tool name="read_memory" use="Read a memory named in the index below" />
-    <Tool name="list_memories" use="Re-list memories after writing one; the index below is the session's starting list" />
+    <Tool name="list_memories" use="Get the memory index; MUST be called before any other work" />
+    <Tool name="read_memory" use="Read a memory named in the `list_memories` index" />
     <Tool name="get_status" use="Work out why a tool returned nothing" />
 
     <Rule>
