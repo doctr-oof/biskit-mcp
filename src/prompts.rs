@@ -108,7 +108,10 @@ mod tests {
             ) > 0
         );
         println!("session brief: {} bytes", session_brief(false).len());
-        println!("session brief (memory-only): {} bytes", session_brief(true).len());
+        println!(
+            "session brief (memory-only): {} bytes",
+            session_brief(true).len()
+        );
     }
 
     #[test]
@@ -136,7 +139,10 @@ mod tests {
                 brief.contains("You MUST call the Biskit `initial_instructions` tool"),
                 "memory_only={memory_only}"
             );
-            assert!(!brief.contains("<Memory name="), "memory_only={memory_only}");
+            assert!(
+                !brief.contains("<Memory name="),
+                "memory_only={memory_only}"
+            );
             assert!(!brief.contains("<Section"), "memory_only={memory_only}");
         }
     }
