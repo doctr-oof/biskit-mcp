@@ -127,7 +127,8 @@ sits. When no ancestor has one, the nearest `.git/` or `default.project.json` wi
 Biskit sets the MCP `instructions` field, which every compliant client surfaces. For Claude Code you
 can additionally inject a short session brief at session start. It carries one rule: call
 `initial_instructions` before doing anything else. That manual then directs the agent to call
-`list_memories` and read the relevant memories.
+`list_memories` and read the relevant memories. Outside memory-only mode, the brief also directs
+the agent to prefer Biskit's symbolic tools over Grep, Glob, and whole-file reads.
 
 `biskit-mcp setup --hooks` writes this to `.claude/settings.local.json`, which is personal and
 normally gitignored. Pass `--hooks-target shared` to put it in `.claude/settings.json` instead,

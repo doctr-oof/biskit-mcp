@@ -30,6 +30,18 @@ const SESSION_BRIEF: &str = concat!(
     "know.\n"
 );
 
+const SYMBOLIC_TOOLS_BRIEF: &str = concat!(
+    "\n## Code navigation\n\n",
+    "For Luau code, you MUST use Biskit's symbolic tools instead of Grep, Glob, or reading whole ",
+    "files:\n",
+    "- `find_symbol` / `find_declaration` to locate definitions\n",
+    "- `find_referencing_symbols` to find usages\n",
+    "- `get_symbols_overview` before reading a file\n",
+    "- `find_file` / `list_dir` instead of Glob or ls\n",
+    "- `search_for_pattern` only when no symbolic tool fits (strings, comments, non-Luau files)\n\n",
+    "Native Grep/Glob are a last resort when Biskit's tools don't return what you need.\n"
+);
+
 pub fn connection_instructions(memory_only: bool) -> &'static str {
     if memory_only {
         return MEMORY_ONLY_CONNECTION_INSTRUCTIONS;
@@ -44,8 +56,11 @@ pub fn instructions_manual(memory_only: bool) -> &'static str {
     INSTRUCTIONS_MANUAL
 }
 
-pub fn session_brief() -> &'static str {
-    SESSION_BRIEF
+pub fn session_brief(memory_only: bool) -> String {
+    if memory_only {
+        return SESSION_BRIEF.to_string();
+    }
+    format!("{SESSION_BRIEF}{SYMBOLIC_TOOLS_BRIEF}")
 }
 
 #[cfg(test)]
@@ -92,7 +107,8 @@ mod tests {
                 MEMORY_ONLY_INSTRUCTIONS_MANUAL
             ) > 0
         );
-        println!("session brief: {} bytes", session_brief().len());
+        println!("session brief: {} bytes", session_brief(false).len());
+        println!("session brief (memory-only): {} bytes", session_brief(true).len());
     }
 
     #[test]
@@ -114,10 +130,22 @@ mod tests {
 
     #[test]
     fn the_brief_only_demands_initial_instructions() {
-        let brief = session_brief();
-        assert!(brief.contains("You MUST call the Biskit `initial_instructions` tool"));
-        assert!(!brief.contains("<Memory name="));
-        assert!(!brief.contains("<Section"));
+        for memory_only in [false, true] {
+            let brief = session_brief(memory_only);
+            assert!(
+                brief.contains("You MUST call the Biskit `initial_instructions` tool"),
+                "memory_only={memory_only}"
+            );
+            assert!(!brief.contains("<Memory name="), "memory_only={memory_only}");
+            assert!(!brief.contains("<Section"), "memory_only={memory_only}");
+        }
+    }
+
+    #[test]
+    fn only_the_full_brief_steers_toward_symbolic_tools() {
+        assert!(session_brief(false).contains("you MUST use Biskit's symbolic tools"));
+        assert!(!session_brief(true).contains("symbolic tools"));
+        assert_eq!(session_brief(true), SESSION_BRIEF);
     }
 
     #[test]
